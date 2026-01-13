@@ -1075,10 +1075,7 @@ if ($function -eq "Modify" -or $function -eq "Backup"){
             Write-Log "SCRIPT: $ThisFileName | END | Local registry key's path already exists as desired." "SUCCESS"
             Exit 0
 
-        } elseif ($ValueNameOnly -eq $TRue) {
-
-            
-        }else {
+        } else {
 
             Write-Log "SCRIPT: $ThisFileName | Local registry key's value is not as desired. Will backup first." 
             
@@ -1140,10 +1137,12 @@ if ($function -eq "Modify" -or $function -eq "Backup"){
 
         }
 
-    } 
+    } else {
 
-    Write-Log "SCRIPT: $ThisFileName | END | Backup complete" "SUCCESS"
-    Exit 0
+        Write-Log "SCRIPT: $ThisFileName | END | Backup complete" "SUCCESS"
+        Exit 0
+
+    }
 
 }
 
