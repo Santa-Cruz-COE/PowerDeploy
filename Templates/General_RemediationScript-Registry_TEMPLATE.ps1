@@ -371,16 +371,16 @@ if ($RegistryChanges -ne "" -and $RegistryChanges -ne $null){
 
             Try {
 
-                if ($Value -eq "" -or $Value -eq $null){
+                # if ($Value -eq "" -or $Value -eq $null){
 
-                    $EndValue = & $RegEditScriptPath -KeyPath $KeyPath -ValueName $ValueName -ValueType $ValueType -Value $Value -WorkingDirectory $WorkingDirectory -Function 'Modify' -AlsoLockDown $AlsoLockDown -KeyOnly $True
+                #     $EndValue = & $RegEditScriptPath -KeyPath $KeyPath -ValueName $ValueName -ValueType $ValueType -Value $Value -WorkingDirectory $WorkingDirectory -Function 'Modify' -AlsoLockDown $AlsoLockDown -ValueNameOnly $True
 
-                } else {
+                # } else {
 
                     $EndValue = & $RegEditScriptPath -KeyPath $KeyPath -ValueName $ValueName -ValueType $ValueType -Value $Value -WorkingDirectory $WorkingDirectory -Function 'Modify' -AlsoLockDown $AlsoLockDown
 
-                }
-                
+                # }
+
             } catch {
 
 

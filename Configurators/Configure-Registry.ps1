@@ -24,6 +24,10 @@ Param(
 
     [string]$KeyOnly = $false, # Used to create an empty key without setting a value
 
+
+    [string]$ValueNameOnly = $False, # Used to create an empty key without setting a value
+
+    
     $AlsoLockDown = $False # Used for doing lockdown during initial creation of a key
 
     # [ValidateSet('Auto','Reg32','Reg64')]
@@ -315,7 +319,7 @@ function Reg-Modify {
 
         # Create the key if it doesn't exist
 
-        Write-Log "Checking if key exists at: $KeyPath"
+        Write-Log "Checking if key [$key] exists at: $KeyPath"
 
         if (-not (Test-Path $KeyPath)) {
             Write-Log "Key does not exist. Attempting to create."
@@ -336,6 +340,9 @@ function Reg-Modify {
         } else {
             Write-Log "Key already exists."
         }
+        Write-Log ""
+        Write-Log "KeyOnly: $KeyOnly"
+        Write-Log ""
         
         if ($KeyOnly -eq $false) {
 
@@ -913,6 +920,7 @@ Write-Log "  KeyPath: $KeyPath"
 Write-Log "  ValueName: $ValueName"
 Write-Log "  Value: $Value"       
 Write-Log "  Type: $ValueType"
+Write-Log "  KeyOnly: $KeyOnly"
 Write-log "================================="
 
 Write-Log "SCRIPT: $ThisFileName | START "
