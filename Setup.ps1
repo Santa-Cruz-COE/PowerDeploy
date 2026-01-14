@@ -1490,146 +1490,17 @@ Function Install--Local-Printer{
     Write-Log "To begin we will access the PrinterData.json file stored in Azure Blob Storage to show you the available printers."
     Write-Log ""
 
+    Select-PrinterFromJSON
+
     Pause
 
-    Write-Log "Now constructing URI for accessing PrinterData.json..." "INFO2"
-    
-    ## Show available printers from JSON ##
-
-    # This snippet was taken from the Install-Printer-IP script
-
-    $parts = $PrinterDataJSONpath -split '/', 2
-
-    $PrinterData_JSON_ContainerName = $parts[0]      
-    $PrinterData_JSON_BlobName = $parts[1]
-
-    # $parts = $ApplicationDataJSONpath -split '\\', 2
-    # $ApplicationData_JSON_ContainerName = $parts[0]      
-    # $ApplicationData_JSON_BlobName = $parts[1]
-
-    $SasToken = $PrinterContainerSASkey
-
-    # Write-Log "Insufficient params. Each of these cannot be empty:" "ERROR"
-    # Write-Log "StorageAccountName: $StorageAccountName"
-    # Write-Log "SasToken: $SasToken"
-    # Write-Log "PrinterData_JSON_ContainerName: $PrinterData_JSON_ContainerName"
-    # Write-Log "PrinterData_JSON_BlobName: $PrinterData_JSON_BlobName"
-    # Exit 1
-
-    Write-Log "Final values to be used to build PrinterData.json URI:" "INFO2"
-    Write-Log "StorageAccountName: $StorageAccountName" "INFO2"
-    Write-Log "SasToken: $SasToken" "INFO2"
-    Write-Log "PrinterData_JSON_ContainerName: $PrinterData_JSON_ContainerName" "INFO2"
-    Write-Log "PrinterData_JSON_BlobName: $PrinterData_JSON_BlobName" "INFO2"
-
-    $printerJSONUri = "https://$StorageAccountName.blob.core.windows.net/$PrinterData_JSON_ContainerName/$PrinterData_JSON_BlobName"+"?"+"$SasToken"
-
-
-    Write-Log "Attempting to access PrinterData.json with this URI: $printerJSONUri" "INFO2"
-
-    Try{
-
-        # TODO: Try and create a snippet that can directly parse JSOn from web
-        #$data = Invoke-RestMethod "$printerJSONUri"
-
-        #$Result =Invoke-WebRequest -Uri $printerJSONUri -OutFile "$WorkingDirectory\temp\PrinterData.json" -UseBasicParsing
-
-        Write-Log "Beginning download..." "INFO2"
-        & $DownloadAzureBlobSAS_ScriptPath -WorkingDirectory $WorkingDirectory -BlobName $PrinterData_JSON_BlobName -StorageAccountName $StorageAccountName -ContainerName $PrinterData_JSON_ContainerName -SasToken $SasToken
-        if($LASTEXITCODE -ne 0){Throw $LASTEXITCODE }
-
-        Write-Log "Parsing JSON" "INFO2"
-        $LocalJSONpath = "$WorkingDirectory\TEMP\Downloads\$PrinterData_JSON_BlobName"
-        if (Test-Path $LocalJSONpath) {Write-Log "Local JSON found. Attempting to get content." "INFO2"} else { Write-Log "Local JSON not found" "ERROR"; throw "Local JSON not found" }
-        #$jsonData = Get-Content -Raw $LocalJSONpath | ConvertFrom-Json
-        try {
-            $jsonText = Get-Content -LiteralPath $LocalJSONpath -Raw -Encoding UTF8
-            $jsonData = $jsonText | ConvertFrom-Json -ErrorAction Stop
-        } catch {
-            Write-Log "ConvertFrom-Json failed: $($_.Exception.Message)" "ERROR"
-            throw $_
-        }
-
-        # "Printers count: {0}" -f ($jsonData.printers.Count)
-        # $jsonData.printers[0] | Format-List *
-        Write-Log "" "INFO2"
-
-        # Can comment out
-        Write-Log "Here are all the printers we found from the JSON:"
-        Write-Log ""
-        $list = $jsonData.printers.PrinterName 
-        Foreach ($item in $list) {
-            Write-Log "$item"
-        }
-        Write-Log "" 
-
-
-    }catch{
-
-        Write-Log "Accessing JSON failed. Exit code returned: $_"
-        Exit 1
-        
-    }
-
-    ## Prompt user to select printer IF one was not provided ##
-    if ($PrinterName -ne $null) {
-
-        Write-Log "Printer name provided as parameter: $PrinterName"
-
-
-    } else {
-
-        Write-Log "Please enter the name of the printer you wish to install from the above list:" "WARNING"
-        $PrinterName = Read-Host "Printer Name"
-        While ([string]::IsNullOrWhiteSpace($PrinterName)) {
-            Write-Log "No printer name provided. Please enter a printer name from the list above:" "ERROR"
-            $PrinterName = Read-Host "Printer Name"
-        }
-
-    }
-
-
-    Write-Log ""
-
-
-    ## Install selected printer ##
-
-        Write-Log "Here is all the data on Printer ($PrinterName):" "INFO2"
-        $printer = $jsonData.printers | Where-Object { $_.PrinterName -eq $PrinterName }
-        Write-Log "" "INFO2"
-
-        if ($printer) {
-            
-            # Write-Log "Formatted list:"
-            # $printer | Format-List *
-
-            # Write-Log "This is the IP address"
-            # $printer.PrinterIP
-
-
-            # Write-Log "Attempting to digest data into PowerShell objects..." "INFO2"
-            Set-VariablesFromObject -InputObject $printer -Scope Script
-            # Write-Log "" "INFO2"
-            # Write-Log "These are the obtained values that are now PowerShell objects:" "INFO2"
-            Write-Log "Port Name: $PortName" "INFO2"
-            Write-Log "Printer IP: $PrinterIP" "INFO2"
-            Write-Log "Printer Name: $PrinterName" "INFO2"
-            Write-Log "Driver Name: $DriverName" "INFO2"
-            Write-Log "INF File: $INFFile" "INFO2"
-            Write-Log "DriverZip: $DriverZip" "INFO2"
-            # Write-Log "" "INFO2"
-
-        } else {
-            Write-Log "Printer '$PrinterName' not found. Your spelling may be incorrect." "ERROR"
-            Exit 1
-        }
     # Call the Install-Printer-IP script with the obtained values
     Write-Log "" "INFO2"
-    Write-Log "Next we will attempt to install the selected printer ($PrinterName) using the install script."
+    Write-Log "Next we will attempt to install the selected printer ($GLobal:PrinterName) using the install script."
     Write-Log ""
     Pause
 
-    & $InstallPrinterIP_ScriptPath -PrinterName $PrinterName -WorkingDirectory $WorkingDirectory
+    & $InstallPrinterIP_ScriptPath -PrinterName $Global:PrinterName -WorkingDirectory $WorkingDirectory
     
     
     Write-Log "" 
@@ -1637,7 +1508,7 @@ Function Install--Local-Printer{
         Write-Log "Install-Printer-IP script failed with exit code: $LASTEXITCODE" "ERROR"
         Exit $LASTEXITCODE
     } else {
-        Write-Log "Printer '$PrinterName' installed successfully!" "SUCCESS"
+        Write-Log "Printer '$Global:PrinterName' installed successfully!" "SUCCESS"
     }   
 
 }   
@@ -2781,6 +2652,231 @@ function Select-ApplicationFromJSON {
 
 }
 
+Function Select-PrinterFromJSON {
+
+    Param (
+
+        $PrinterName=$null,
+        $DialogueSelection="A"
+
+    )
+
+    Write-Log "Now constructing URI for accessing PrinterData.json..." "INFO2"
+    
+    ## Show available printers from JSON ##
+
+    # This snippet was taken from the Install-Printer-IP script
+
+    $parts = $PrinterDataJSONpath -split '/', 2
+
+    $PrinterData_JSON_ContainerName = $parts[0]      
+    $PrinterData_JSON_BlobName = $parts[1]
+
+    # $parts = $ApplicationDataJSONpath -split '\\', 2
+    # $ApplicationData_JSON_ContainerName = $parts[0]      
+    # $ApplicationData_JSON_BlobName = $parts[1]
+
+    $SasToken = $PrinterContainerSASkey
+
+    # Write-Log "Insufficient params. Each of these cannot be empty:" "ERROR"
+    # Write-Log "StorageAccountName: $StorageAccountName"
+    # Write-Log "SasToken: $SasToken"
+    # Write-Log "PrinterData_JSON_ContainerName: $PrinterData_JSON_ContainerName"
+    # Write-Log "PrinterData_JSON_BlobName: $PrinterData_JSON_BlobName"
+    # Exit 1
+
+    Write-Log "Final values to be used to build PrinterData.json URI:" "INFO2"
+    Write-Log "StorageAccountName: $StorageAccountName" "INFO2"
+    Write-Log "SasToken: $SasToken" "INFO2"
+    Write-Log "PrinterData_JSON_ContainerName: $PrinterData_JSON_ContainerName" "INFO2"
+    Write-Log "PrinterData_JSON_BlobName: $PrinterData_JSON_BlobName" "INFO2"
+
+    $printerJSONUri = "https://$StorageAccountName.blob.core.windows.net/$PrinterData_JSON_ContainerName/$PrinterData_JSON_BlobName"+"?"+"$SasToken"
+
+
+    Write-Log "Attempting to access PrinterData.json with this URI: $printerJSONUri" "INFO2"
+
+    Try{
+
+        # TODO: Try and create a snippet that can directly parse JSOn from web
+        #$data = Invoke-RestMethod "$printerJSONUri"
+
+        #$Result =Invoke-WebRequest -Uri $printerJSONUri -OutFile "$WorkingDirectory\temp\PrinterData.json" -UseBasicParsing
+
+        Write-Log "Beginning download..." "INFO2"
+        & $DownloadAzureBlobSAS_ScriptPath -WorkingDirectory $WorkingDirectory -BlobName $PrinterData_JSON_BlobName -StorageAccountName $StorageAccountName -ContainerName $PrinterData_JSON_ContainerName -SasToken $SasToken
+        if($LASTEXITCODE -ne 0){Throw $LASTEXITCODE }
+
+        Write-Log "Parsing JSON" "INFO2"
+        $LocalJSONpath = "$WorkingDirectory\TEMP\Downloads\$PrinterData_JSON_BlobName"
+        if (Test-Path $LocalJSONpath) {Write-Log "Local JSON found. Attempting to get content." "INFO2"} else { Write-Log "Local JSON not found" "ERROR"; throw "Local JSON not found" }
+        #$jsonData = Get-Content -Raw $LocalJSONpath | ConvertFrom-Json
+        try {
+            $jsonText = Get-Content -LiteralPath $LocalJSONpath -Raw -Encoding UTF8
+            $jsonData = $jsonText | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            Write-Log "ConvertFrom-Json failed: $($_.Exception.Message)" "ERROR"
+            throw $_
+        }
+
+        # "Printers count: {0}" -f ($jsonData.printers.Count)
+        # $jsonData.printers[0] | Format-List *
+        Write-Log "" "INFO2"
+
+        # Can comment out
+        Write-Log "Here are all the printers we found from the JSON:"
+        Write-Log ""
+        $list = $jsonData.printers.PrinterName 
+ 
+
+        $Counter = 1
+        $HashTable = @{}
+        Foreach ($item in $list) {
+            Write-Log "$Counter - $item"
+
+            $HashTable.Add($Counter,$item)
+
+            $Counter++
+
+            #$HashTable
+
+        }
+
+
+    }catch{
+
+        Write-Log "Accessing JSON failed. Exit code returned: $_"
+        Exit 1
+        
+    }
+
+    ## Prompt user to select printer IF one was not provided ##
+    # if ($PrinterName -ne $null) {
+
+    #     Write-Log "Printer name provided as parameter: $PrinterName"
+
+
+    # } else {
+
+    #     Write-Log "Please enter the name of the printer you wish to install from the above list:" "WARNING"
+    #     $PrinterName = Read-Host "Printer Name"
+    #     While ([string]::IsNullOrWhiteSpace($PrinterName)) {
+    #         Write-Log "No printer name provided. Please enter a printer name from the list above:" "ERROR"
+    #         $PrinterName = Read-Host "Printer Name"
+    #     }
+
+    # }
+
+    While($exit -ne "y") {
+
+            if ($DialogueSelection -eq "B"){
+
+                Write-Log "Enter the # of an printer from the above list to add to InTune." "WARNING"
+                Write-Log " - NOTE: If you DO NOT SEE the printer you want, type 'exit' and you can add your own." "WARNING"
+            
+            } elseif ($DialogueSelection -eq "A"){
+
+                Write-Log "Enter the # of an printer from the list above for installation." "WARNING"
+
+            } elseif ($DialogueSelection -eq "C"){
+
+                Write-Log "Enter the # of an printer from the list above for uninstallation." "WARNING"
+
+            } else {
+
+                Write-Log "Enter the # of an Printer from the list above." "WARNING"
+
+            }
+            
+            
+            $PrinterNumToFind = Read-Host "Please enter a number between 1 and $($COUNTER - 1)"
+
+            if ($PrinterNumToFind -eq 'exit') {
+
+                Return $null
+
+            }
+
+            While ( [int]$PrinterNumToFind -lt 1 -or [int]$PrinterNumToFind -ge $COUNTER ) {
+
+                Write-Log "Invalid choice. Please select a valid number from the list above." "WARNING"
+                $PrinterNumToFind = Read-Host "Please enter a number between 1 and $($COUNTER - 1)"
+
+                if ($PrinterNumToFind -eq 'exit') {
+
+                    Return $null
+
+                }
+
+            }
+
+            While ([string]::IsNullOrWhiteSpace($PrinterNumToFind)) {
+
+                Write-Log "No printer name provided. Please enter a # from the list above. If you wish to exit this selection, type 'exit'." "ERROR"
+                $PrinterNumToFind = Read-Host "Please enter a number between 1 and $($COUNTER - 1)"
+
+                if ($PrinterNumToFind -eq 'exit') {
+                    Return $null
+                }
+
+            }
+
+            [string]$PrinterNameToFind = $HashTable[[int]$PrinterNumToFind]
+
+            Write-Log "Printer requested: $PrinterNameToFind | Is this correct?" "WARNING"
+            $exit = Read-Host "(Y/N)"
+        }
+
+    Write-Log ""
+
+
+    $PrinterName = $PrinterNameToFind
+
+    ## Install selected printer ##
+
+        Write-Log "Here is all the data on Printer ($PrinterName):" "INFO2"
+        $printer = $jsonData.printers | Where-Object { $_.PrinterName -eq $PrinterName }
+        Write-Log "" "INFO2"
+
+        if ($printer) {
+            
+            # Write-Log "Formatted list:"
+            # $printer | Format-List *
+
+            # Write-Log "This is the IP address"
+            # $printer.PrinterIP
+
+
+            # Write-Log "Attempting to digest data into PowerShell objects..." "INFO2"
+            Set-VariablesFromObject -InputObject $printer -Scope Script
+            # Write-Log "" "INFO2"
+            # Write-Log "These are the obtained values that are now PowerShell objects:" "INFO2"
+            Write-Log "Port Name: $PortName" "INFO2"
+            Write-Log "Printer IP: $PrinterIP" "INFO2"
+            Write-Log "Printer Name: $PrinterName" "INFO2"
+            Write-Log "Driver Name: $DriverName" "INFO2"
+            Write-Log "INF File: $INFFile" "INFO2"
+            Write-Log "DriverZip: $DriverZip" "INFO2"
+            # Write-Log "" "INFO2"
+
+        } else {
+
+            Write-Log "Printer '$PrinterName' not found. Your spelling may be incorrect." "ERROR"
+            Exit 1
+
+        }
+
+        # Set all vars as global for use in other functions
+        $Global:PortName = $PortName
+        $Global:PrinterIP = $PrinterIP
+        $Global:PrinterName = $PrinterName
+        $Global:DriverName = $DriverName
+        $Global:INFFile = $INFFile
+        $Global:DriverZip = $DriverZip
+
+
+}
+
 function Set-VariablesFromObject {
     param(
         [Parameter(Mandatory, ValueFromPipeline)] $InputObject,
@@ -3192,8 +3288,85 @@ Try{
 
 # Update this repo
 # TODO: This isn't working quite yet. Need to add auth too.
+
+Push-Location $RepoRoot
+
+    Write-Log "Dot sourcing Git Runner template script located at: $GitRunnerTemplate_ScriptPath" "INFO2"
+    . $GitRunnerTemplate_ScriptPath -RepoURL "ZZ" -RepoNickName $ThisRepoNickName -WorkingDirectory $WorkingDirectory 
+
+    Write-Log "Running Git pre-reqs" "INFO2"
+    Write-Log "" "INFO2"
+
+
+    $gitOutput = git fetch 2>&1
+    ForEach ($line in $gitOutput) { Write-Log "GIT: $line" } ; if ($LASTEXITCODE -ne 0) {Write-Log "++++++++++++++++++++++"; Write-Log "SCRIPT: $ThisFileName | END | Failed" "ERROR"; Exit 1 }
+
+    $gitBranch = git rev-parse --abbrev-ref HEAD 2>&1
+    ForEach ($line in $gitBranch) { Write-Log "GIT: $line" } ; if ($LASTEXITCODE -ne 0) {Write-Log "++++++++++++++++++++++"; Write-Log "SCRIPT: $ThisFileName | END | Failed" "ERROR"; Exit 1 }
+
+    $gitCommit = git rev-parse HEAD 2>&1
+    ForEach ($line in $gitCommit) { Write-Log "GIT: $line" } ; if ($LASTEXITCODE -ne 0) {Write-Log "++++++++++++++++++++++"; Write-Log "SCRIPT: $ThisFileName | END | Failed" "ERROR"; Exit 1 }
+
+    $gitURL = git remote get-url origin 2>&1
+    ForEach ($line in $gitURL) { Write-Log "GIT: $line" } ; if ($LASTEXITCODE -ne 0) {Write-Log "++++++++++++++++++++++"; Write-Log "SCRIPT: $ThisFileName | END | Failed" "ERROR"; Exit 1 }
+
+    $gitCommitRemote = git ls-remote origin $gitBranch | ForEach-Object { $_.Split("`t")[0] } 2>&1
+    ForEach ($line in $gitCommitRemote) { Write-Log "GIT: $line" } ; if ($LASTEXITCODE -ne 0) {Write-Log "++++++++++++++++++++++"; Write-Log "SCRIPT: $ThisFileName | END | Failed" "ERROR"; Exit 1 }
+    
+
+    CheckAndInstall-Git
+    Set-GitSafeDirectory
+
+    Write-Log "" "INFO2"
+
+
 Clear
-Write-Log "Would you like to update the repo to the latest version? (y/n)" "WARNING"
+
+# Determine the deploy mode
+
+# if $gitURL contains the CustomRepoURL, then this is a custom org deployment
+if ($gitURL -match [regex]::Escape($CustomRepoURL) -and $CustomRepoURL -ne "" -and $CustomRepoURL -ne $null) {
+
+    if ($gitBranch -eq "Dev"){
+
+        $PerceivedMode = "PRIVATE-DEVELOPMENT"
+    } elseif ($gitBranch -eq "Main" -or $gitBranch -eq "Master") {
+        $PerceivedMode = "PRODUCTION"
+    } else {
+        $PerceivedMode = "???"
+    }
+
+} elseif ($gitURL -match "$OfficialPublicRepoURL") {
+
+    if ($gitBranch -eq "Dev"){
+
+        $PerceivedMode = "PUBLIC-DEVELOPMENT"
+    } elseif ($gitBranch -eq "Main" -or $gitBranch -eq "Master") {
+        $PerceivedMode = "PUBLIC-TESTING"
+    } else {
+        $PerceivedMode = "???"
+    }
+
+} else {
+
+    $PerceivedMode = "???"
+
+}
+
+
+Write-Log "=================================="
+Write-Log "===== Current Git Repo info: ====="
+Write-Log "=================================="
+Write-Log "Operational Mode:                 $PerceivedMode"
+Write-Log "Details:"
+Write-Log "     URL:                         $gitURL"
+Write-Log "     Branch:                      $gitBranch"
+Write-Log "     Latest Commit on Remote:     $($gitCommitRemote)"
+Write-Log "     Local Commit:                $gitCommit"
+Write-Log "=================================="
+# Write-Log "NOTE: Operational mode indicates which version of the code this currently repo is using."
+Write-Log ""
+Write-Log "Would you like to update the repo to the latest version?" "WARNING"
 $Answer = Read-Host "y/n"
 if ($Answer -ne "y" -and $Answer -ne "n") {
     Write-Log "Invalid input. Please type 'y' to update or 'n' to skip." "ERROR"
@@ -3202,24 +3375,14 @@ if ($Answer -ne "y" -and $Answer -ne "n") {
 
 If ($Answer -eq "y"){
 
-    Push-Location $RepoRoot
+    
 
     Write-Log "Updating local repo located at: $RepoRoot" "INFO2"
 
-    Write-Log "Dot sourcing Git Runner template script located at: $GitRunnerTemplate_ScriptPath" "INFO2"
-    . $GitRunnerTemplate_ScriptPath -RepoURL "ZZ" -RepoNickName $ThisRepoNickName -WorkingDirectory $WorkingDirectory 
-
-    Write-Log "Running Git pre-reqs" "INFO2"
-    Write-Log "" "INFO2"
-
-    
-    CheckAndInstall-Git
-    Set-GitSafeDirectory
-
     Write-Log "" "INFO2"
 
 
-    Write-Log "Running Git Pull to update the repo..." "INFO2"
+    # Write-Log "Running Git Pull to update the repo..." "INFO2"
 
     $gitOutput = git pull 2>&1
     ForEach ($line in $gitOutput) { Write-Log "GIT: $line" } ; if ($LASTEXITCODE -ne 0) {Write-Log "++++++++++++++++++++++"; Write-Log "SCRIPT: $ThisFileName | END | Failed" "ERROR"; Exit 1 }
@@ -3228,9 +3391,11 @@ If ($Answer -eq "y"){
  
     Write-Log "Repo updated to the latest version."
     Pause
-    Pop-Location 
      
 } 
+
+Pop-Location 
+
 
 Write-Log "" "INFO2"
 
