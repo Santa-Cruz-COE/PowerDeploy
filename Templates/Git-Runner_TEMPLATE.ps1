@@ -194,19 +194,30 @@ if ($RepoToken -ne "") {
 ## Functions ##
 ###############
 
+
 function Write-Log {
     param(
         [string]$Message,
         [string]$Level = "INFO"
     )
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $logEntry = "[$timestamp] [$Level] $Message"
+    
+    if ($Level -eq "INFO2") {
+        $logEntry = "[$timestamp] [INFO] $Message"
+    } else {
+        $logEntry = "[$timestamp] [$Level] $Message"
+    }
+
+    
     
     switch ($Level) {
         "ERROR"   { Write-Host $logEntry -ForegroundColor Red }
         "WARNING" { Write-Host $logEntry -ForegroundColor Yellow }
         "SUCCESS" { Write-Host $logEntry -ForegroundColor Green }
         "DRYRUN"  { Write-Host $logEntry -ForegroundColor Cyan }
+        "INFO"    { Write-Host $logEntry -ForegroundColor Cyan }
+        "INFO2"    { Write-Host $logEntry }
+
         default   { Write-Host $logEntry }
     }
     

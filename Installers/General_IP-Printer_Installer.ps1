@@ -785,7 +785,7 @@ If (-not $ThrowBad) {
     Catch {
         Write-Log "Error installing Printer Driver" "ERROR"
         Write-Log "$($_.Exception.Message)" "ERROR"
-        Write-Log "Make sure the architecture of driver/machine matches!!!"
+        Write-Log "Make sure the architecture of driver/machine matches!!!" "WARNING"
         # Write-Log "Error installing Printer Driver" "ERROR"
         # Write-Log "$($_.Exception)" "ERROR"
         $ThrowBad = $True
