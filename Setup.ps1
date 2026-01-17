@@ -3704,7 +3704,13 @@ Try{
 Push-Location $RepoRoot
 
     Write-Log "Dot sourcing Git Runner template script located at: $GitRunnerTemplate_ScriptPath" "INFO2"
-    . $GitRunnerTemplate_ScriptPath -RepoURL "ZZ" -RepoNickName $ThisRepoNickName -WorkingDirectory $WorkingDirectory -UpdateLocalRepoOnly $true
+
+    & { # Run in a script block to avoid scope issues
+        . $GitRunnerTemplate_ScriptPath -RepoURL "ZZ" -RepoNickName $ThisRepoNickName -WorkingDirectory $WorkingDirectory -UpdateLocalRepoOnly $true
+
+        CheckAndInstall-Git
+        Set-GitSafeDirectory
+    }
 
     Write-Log "Running Git pre-reqs" "INFO2"
     Write-Log "" "INFO2"
@@ -3726,8 +3732,7 @@ Push-Location $RepoRoot
     ForEach ($line in $gitCommitRemote) { Write-Log "GIT: $line" } ; if ($LASTEXITCODE -ne 0) {Write-Log "++++++++++++++++++++++"; Write-Log "SCRIPT: $LocalFileName | END | Failed" "ERROR"; Exit 1 }
     
 
-    CheckAndInstall-Git
-    Set-GitSafeDirectory
+
 
     Write-Log "" "INFO2"
 
