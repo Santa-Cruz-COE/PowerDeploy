@@ -50,6 +50,13 @@ $CustomGitRunnerMakerScript = "$RepoRoot\Other_Tools\Generate_Custom-Script_From
 
 $ThisFileName = $MyInvocation.MyCommand.Name
 
+# $LocalRepoPath = "$WorkingDirectory\$RepoNickName"
+$LogRoot = "$WorkingDirectory\Logs\Generator_Logs"
+#$LogPath = "$LogRoot\$RepoNickName._Git_Log_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+# $ThisFileName = $MyInvocation.MyCommand.Name
+$LogPath = "$LogRoot\$ThisFileName.$DesiredFunction.$RepoNickName.$RepoBranch._Log_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+
+
 # $RepoRoot = "C:\ProgramData\PowerDeploy\$RepoNickName"
 # $WorkingDirectory = Split-Path -Path $RepoRoot -Parent
 
@@ -57,6 +64,43 @@ $ThisFileName = $MyInvocation.MyCommand.Name
 #############
 # Functions #
 #############
+
+function Write-Log {
+    param(
+        [string]$Message,
+        [string]$Level = "INFO"
+    )
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    
+    if ($Level -eq "INFO2") {
+        $logEntry = "[$timestamp] [INFO] $Message"
+    } else {
+        $logEntry = "[$timestamp] [$Level] $Message"
+    }
+
+    
+    
+    switch ($Level) {
+        "ERROR"   { Write-Host $logEntry -ForegroundColor Red }
+        "WARNING" { Write-Host $logEntry -ForegroundColor Yellow }
+        "SUCCESS" { Write-Host $logEntry -ForegroundColor Green }
+        "DRYRUN"  { Write-Host $logEntry -ForegroundColor Cyan }
+        "INFO"    { Write-Host $logEntry -ForegroundColor Cyan }
+        "INFO2"    { Write-Host $logEntry }
+
+        default   { Write-Host $logEntry }
+    }
+    
+    # Ensure log directory exists
+    $logDir = Split-Path $LogPath -Parent
+    if (!(Test-Path $logDir)) {
+        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    }
+    
+    Add-Content -Path $LogPath -Value $logEntry
+}
+
+
 
 function New-IntuneGitRunnerCommand {
     param(
@@ -68,21 +112,21 @@ function New-IntuneGitRunnerCommand {
         [string]$CustomNameModifier
     )
 
-    Write-Host "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START" -ForegroundColor Yellow
-    Write-host ""
-    Write-Host "RepoNickName: $RepoNickName"
-    Write-Host "RepoUrl: $RepoUrl"
-    Write-Host "TargetWorkingDirectory: $TargetWorkingDirectory"
-    Write-Host "ScriptPath: $ScriptPath"
-    Write-Host "ScriptParams: $ScriptParams"
-    Write-Host "CustomNameModifier: $CustomNameModifier"
-    Write-host ""
+    Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START" -ForegroundColor Yellow
+    Write-Log ""
+    Write-Log "RepoNickName: $RepoNickName"
+    Write-Log "RepoUrl: $RepoUrl"
+    Write-Log "TargetWorkingDirectory: $TargetWorkingDirectory"
+    Write-Log "ScriptPath: $ScriptPath"
+    Write-Log "ScriptParams: $ScriptParams"
+    Write-Log "CustomNameModifier: $CustomNameModifier"
+    Write-Log ""
 
-    Write-Host "Function parameters received:"
-    Write-host ""
+    Write-Log "Function parameters received:"
+    Write-Log ""
     if ($ScriptParams) {
 
-        Write-Host "Script parameters to encode:" #-ForegroundColor Cyan
+        Write-Log "Script parameters to encode:" #-ForegroundColor Cyan
         $ScriptParams | Format-List | Out-Host
 
         # Encode the parameters
@@ -99,14 +143,14 @@ function New-IntuneGitRunnerCommand {
 %SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& '.\Git-Runner_TEMPLATE.ps1' -RepoNickName '$RepoNickName' -RepoUrl '$RepoUrl' -WorkingDirectory '$TargetWorkingDirectory' -ScriptPath '$ScriptPath'"
 "@
     }
-        Write-Host ""
+        Write-Log ""
 
 
-    Write-Host "Custom command generated:" #-ForegroundColor Green
-    Write-Host $command
-    Write-Host ""
-    Write-Host "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | Creating custom script..." #-ForegroundColor Green
-    Write-Host ""
+    Write-Log "Custom command generated:" #-ForegroundColor Green
+    Write-Log $command
+    Write-Log ""
+    Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | Creating custom script..." #-ForegroundColor Green
+    Write-Log ""
 
     # Create the custom script with the current params
     if($CustomNameModifier){
@@ -115,14 +159,14 @@ function New-IntuneGitRunnerCommand {
     else {
         $global:CustomScript = & $CustomGitRunnerMakerScript -RepoNickName $RepoNickName -RepoUrl $RepoUrl -RepoBranch $RepoBranch -WorkingDirectory $TargetWorkingDirectory -ScriptPath $ScriptPath -ScriptParamsBase64 $paramsBase64
     }   
-    Write-Host ""
+    Write-Log ""
 
-    Write-Host "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | Custom script created." #-ForegroundColor Green
+    Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | Custom script created." #-ForegroundColor Green
 
     # done
-    Write-Host ""
-    Write-Host "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END"
-        Write-Host ""
+    Write-Log ""
+    Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END"
+        Write-Log ""
 
     return $command
 }
@@ -143,19 +187,19 @@ function ExportTXT {
 
     # Output the command to a txt file and to clipboard
 
-    Write-Host "Final install command:"
-    Write-Host $installCommand #-ForegroundColor Green
-    Write-Host ""
+    Write-Log "Final install command:"
+    Write-Log $installCommand #-ForegroundColor Green
+    Write-Log ""
 
 
     $installCommand | Set-Content -Encoding utf8 $InstallCommandTXT
-    Write-Host "Install command saved here: $InstallCommandTXT"
-    Write-Host ""
+    Write-Log "Install command saved here: $InstallCommandTXT"
+    Write-Log ""
 
     $installCommand | Set-Clipboard 
-    Write-Host "Install command saved to your clip board!"
+    Write-Log "Install command saved to your clip board!"
 
-    Write-Host ""
+    Write-Log ""
 
     return $InstallCommandTXT
 }
@@ -174,9 +218,9 @@ $updateCommand = New-IntuneGitRunnerCommand `
     -RepoUrl "$RepoURL" `
     -WorkingDirectory "C:\ProgramData\Test7"
 
-Write-Host "Update Only Command:" -ForegroundColor Green
-Write-Host $updateCommand
-Write-Host ""
+Write-Log "Update Only Command:" -ForegroundColor Green
+Write-Log $updateCommand
+Write-Log ""
 #>
 
 
@@ -201,23 +245,23 @@ Function RegRemediationScript {
 
     )
 
-    Write-Host "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START" -ForegroundColor Yellow
-    Write-Host ""
+    Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START" -ForegroundColor Yellow
+    Write-Log ""
     # Display all the supplied parameters for the function:
-    Write-Host "Function parameters received:"
-        Write-Host ""
+    Write-Log "Function parameters received:"
+        Write-Log ""
 
     # Check the returned hashtable
-    Write-Host "StorageAccountName:         $StorageAccountName"
-    Write-Host "PrinterDataJSONpath:        $PrinterDataJSONpath"
-    Write-Host "PrinterContainerSASkey:     $PrinterContainerSASkey"
-    Write-Host "ApplicationDataJSONpath:    $ApplicationDataJSONpath"
-    Write-Host "ApplicationContainerSASkey: $ApplicationContainerSASkey"
-    Write-Host "CustomRepoURL:              $CustomRepoURL"
-    Write-Host "CustomRepoToken:            $CustomRepoToken"
+    Write-Log "StorageAccountName:         $StorageAccountName"
+    Write-Log "PrinterDataJSONpath:        $PrinterDataJSONpath"
+    Write-Log "PrinterContainerSASkey:     $PrinterContainerSASkey"
+    Write-Log "ApplicationDataJSONpath:    $ApplicationDataJSONpath"
+    Write-Log "ApplicationContainerSASkey: $ApplicationContainerSASkey"
+    Write-Log "CustomRepoURL:              $CustomRepoURL"
+    Write-Log "CustomRepoToken:            $CustomRepoToken"
     # End display of parameters
-    Write-Host ""   
-    Write-Host "Generating Detect/Remediation scripts for Registry changes..." -ForegroundColor Yellow
+    Write-Log ""   
+    Write-Log "Generating Detect/Remediation scripts for Registry changes..." -ForegroundColor Yellow
     # Choose the registry changes.
 
         # Declare as list to bypass the Git Runner's function of putting passed string params into double quotes. This breaks the pass to the remediation script.
@@ -311,11 +355,11 @@ Function RegRemediationScript {
         # $RegistryChanges = @()
         # $RegistryChanges += '''[-KeyPath "HKEY_LOCAL_MACHINE\SOFTWARE\PowerDeploy-Test" -ValueName "Test" -ValueType "String" -Value "zz"],[-KeyPath "HKEY_LOCAL_MACHINE\SOFTWARE\PowerDeploy-Test" -ValueName "Test 2" -ValueType "String" -Value "zz 2"]'''
 
-        Write-Host "Registry Changes to process: $RegistryChanges" #-ForegroundColor Yellow
+        Write-Log "Registry Changes to process: $RegistryChanges" #-ForegroundColor Yellow
 
     # Then compose the install command args and run for DETECT
-    Write-Host ""
-    Write-Host "DETECT SCRIPT" -ForegroundColor Yellow
+    Write-Log ""
+    Write-Log "DETECT SCRIPT" -ForegroundColor Yellow
     $CustomNameModifier = "Detect"
     $installCommand = New-IntuneGitRunnerCommand `
         -RepoNickName "$RepoNickName" `
@@ -339,8 +383,8 @@ Function RegRemediationScript {
     $DetectScriptCommandTXT = ExportTXT
 
     # Then compose the install command args and run for REMEDIATE
-    Write-Host ""
-    Write-Host "REMEDIATION SCRIPT" -ForegroundColor Yellow
+    Write-Log ""
+    Write-Log "REMEDIATION SCRIPT" -ForegroundColor Yellow
     $CustomNameModifier = "Remediate"
     $installCommand = New-IntuneGitRunnerCommand `
         -RepoNickName "$RepoNickName" `
@@ -381,18 +425,18 @@ Function RegRemediationScript {
     $script:GI_RemediationScriptCommandTXT = $RemediationScriptCommandTXT
 
     # Just for visibility, still log what we *think* we produced
-    Write-Host "Return values prepared."
+    Write-Log "Return values prepared."
 
 
-    Write-Host "script:GI_DetectScript = $script:GI_DetectScript"
-    Write-Host "script:GI_DetectScriptCommandTXT = $script:GI_DetectScriptCommandTXT"
-    Write-Host "script:GI_RemediationScript = $script:GI_RemediationScript"
-    Write-Host "script:GI_RemediationScriptCommandTXT = $script:GI_RemediationScriptCommandTXT"
+    Write-Log "script:GI_DetectScript = $script:GI_DetectScript"
+    Write-Log "script:GI_DetectScriptCommandTXT = $script:GI_DetectScriptCommandTXT"
+    Write-Log "script:GI_RemediationScript = $script:GI_RemediationScript"
+    Write-Log "script:GI_RemediationScriptCommandTXT = $script:GI_RemediationScriptCommandTXT"
 
 
 
-    Write-Host "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END"
-    Write-host ""
+    Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END"
+    Write-Log ""
 
 
 
@@ -445,37 +489,37 @@ function InstallPrinterByIP {
         [String]$PrinterName="zz" # Didn't want to set to $false or $null for eval purposes. If printername is contained inside functionparams this gets overwritten. If I set default as $True, $False, or $Null it will be difficult to evaluate that no printername was passed either way, hence I made it "zz" as a dummy value.
 
     )
-    Write-Host "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START" -ForegroundColor Yellow
+    Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START" -ForegroundColor Yellow
 
-    Write-Host "Generating Install script for Printer by IP..." -ForegroundColor Yellow
+    Write-Log "Generating Install script for Printer by IP..." -ForegroundColor Yellow
 
-    Write-Host "Function parameters received:"
+    Write-Log "Function parameters received:"
     # Check the returned hashtable
     # TODO: May want to replace this with the method from InstallAppWithJSON function that checks for specific keys instead of just any keys. This method here can produce errors.
     if(($FunctionParams -eq $null) -or ($FunctionParams.Count -eq 0)){ 
-        Write-Host "No data returned! Checking if a printer was explicitly specified..." #"ERROR"
+        Write-Log "No data returned! Checking if a printer was explicitly specified..." #"ERROR"
         if(-not $PrinterName){
-            Write-Host "No printer specified. Exiting!" #"ERROR"
+            Write-Log "No printer specified. Exiting!" #"ERROR"
             Exit 1
 
         } else {
-            Write-Host "Printer specified as: $PrinterName"
+            Write-Log "Printer specified as: $PrinterName"
         }
     } else {
 
-        Write-Host "Values retrieved:"
+        Write-Log "Values retrieved:"
         foreach ($key in $FunctionParams.Keys) {
             $value = $FunctionParams[$key]
-            Write-Host "   $key : $value"
+            Write-Log "   $key : $value"
         }    
 
         # Turn the returned hashtable into variables
-        Write-Host "Setting values as local variables..."
+        Write-Log "Setting values as local variables..."
         foreach ($key in $FunctionParams.Keys) {
             Set-Variable -Name $key -Value $FunctionParams[$key] -Scope Local
             # Write-Log "Should be: $key = $($ReturnHash[$key])"
             $targetValue = Get-Variable -Name $key -Scope Local
-            Write-Host "Ended up as: $key = $($targetValue.Value)"
+            Write-Log "Ended up as: $key = $($targetValue.Value)"
 
         }
 
@@ -483,7 +527,7 @@ function InstallPrinterByIP {
 
 
     If ($PrinterName -eq "zz"){
-        Write-Host "PrinterName is still the default 'zz'. Please specify a valid PrinterName. Exiting!" #"ERROR"
+        Write-Log "PrinterName is still the default 'zz'. Please specify a valid PrinterName. Exiting!" #"ERROR"
         Exit 1
     }
 
@@ -491,8 +535,8 @@ function InstallPrinterByIP {
     #$PrinterName = "Auckland"
 
     # Main install command:
-    Write-Host ""
-    Write-Host "INSTALL COMMAND" -ForegroundColor Yellow
+    Write-Log ""
+    Write-Log "INSTALL COMMAND" -ForegroundColor Yellow
     $CustomNameModifier = "Install-Printer-IP.$PrinterName"
     $installCommand = New-IntuneGitRunnerCommand `
         -RepoNickName "$RepoNickName" `
@@ -511,8 +555,8 @@ function InstallPrinterByIP {
     $InstallCommandTXT = ExportTXT
 
     # Detection script command:
-    Write-Host ""
-    Write-Host "DETECT SCRIPT" -ForegroundColor Yellow
+    Write-Log ""
+    Write-Log "DETECT SCRIPT" -ForegroundColor Yellow
     $CustomNameModifier = "Detect-Printer.$PrinterName"
     $detectCommand = New-IntuneGitRunnerCommand `
         -RepoNickName "$RepoNickName" `
@@ -541,8 +585,8 @@ function InstallPrinterByIP {
         DetectPrinterScript = $DetectPrinterScript
     }
 
-    Write-host "Return values prepared."
-    $ReturnHash.Keys | ForEach-Object { Write-Host "   $_ : $($ReturnHash[$_])" }   
+    Write-Log "Return values prepared."
+    $ReturnHash.Keys | ForEach-Object { Write-Log "   $_ : $($ReturnHash[$_])" }   
     Return $ReturnHash
 
     #>
@@ -556,16 +600,16 @@ function InstallPrinterByIP {
     $script:GI_DetectPrinterScript       = $DetectPrinterScript
 
     # Just for visibility, still log what we *think* we produced
-    Write-Host "Return values prepared."
-    Write-Host "   MainInstallCommand     : $script:GI_MainInstallCommand"
-    Write-Host "   MainInstallCommandTXT  : $script:GI_MainInstallCommandTXT"
-    Write-Host "   MainDetectCommand      : $script:GI_MainDetectCommand"
-    Write-Host "   MainDetectCommandTXT   : $script:GI_MainDetectCommandTXT"
-    Write-Host "   InstallPrinterScript       : $script:GI_InstallPrinterScript"
-    Write-Host "   DetectPrinterScript        : $script:GI_DetectPrinterScript"
+    Write-Log "Return values prepared."
+    Write-Log "   MainInstallCommand     : $script:GI_MainInstallCommand"
+    Write-Log "   MainInstallCommandTXT  : $script:GI_MainInstallCommandTXT"
+    Write-Log "   MainDetectCommand      : $script:GI_MainDetectCommand"
+    Write-Log "   MainDetectCommandTXT   : $script:GI_MainDetectCommandTXT"
+    Write-Log "   InstallPrinterScript       : $script:GI_InstallPrinterScript"
+    Write-Log "   DetectPrinterScript        : $script:GI_DetectPrinterScript"
 
-    Write-Host "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END"
-    Write-host ""
+    Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END"
+    Write-Log ""
 
     $Script:HashPattern = "InstallPrinterByIP"
 
@@ -586,40 +630,40 @@ function UninstallPrinterByName {
 
     )
 
-    Write-Host "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START" -ForegroundColor Yellow
+    Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START" -ForegroundColor Yellow
 
-    Write-Host "Generating Uninstall script for Printer by name..." -ForegroundColor Yellow
+    Write-Log "Generating Uninstall script for Printer by name..." -ForegroundColor Yellow
 
     ###
 
-    Write-Host "Function parameters received:"
+    Write-Log "Function parameters received:"
     # Check the returned hashtable
     # TODO: May want to replace this with the method from InstallAppWithJSON function that checks for specific keys instead of just any keys. This method here can produce errors.
 
     if(($FunctionParams -eq $null) -or ($FunctionParams.Count -eq 0)){
-        Write-Host "No data returned! Checking if a printer was explicitly specified..." #"ERROR"
+        Write-Log "No data returned! Checking if a printer was explicitly specified..." #"ERROR"
         if(-not $PrinterName){
-            Write-Host "No printer specified. Exiting!" #"ERROR"
+            Write-Log "No printer specified. Exiting!" #"ERROR"
             Exit 1
 
         } else {
-            Write-Host "Printer specified as: $PrinterName"
+            Write-Log "Printer specified as: $PrinterName"
         }
     } else {
 
-        Write-Host "Values retrieved:"
+        Write-Log "Values retrieved:"
         foreach ($key in $FunctionParams.Keys) {
             $value = $FunctionParams[$key]
-            Write-Host "   $key : $value"
+            Write-Log "   $key : $value"
         }    
 
         # Turn the returned hashtable into variables
-        Write-Host "Setting values as local variables..."
+        Write-Log "Setting values as local variables..."
         foreach ($key in $FunctionParams.Keys) {
             Set-Variable -Name $key -Value $FunctionParams[$key] -Scope Local
             # Write-Log "Should be: $key = $($ReturnHash[$key])"
             $targetValue = Get-Variable -Name $key -Scope Local
-            Write-Host "Ended up as: $key = $($targetValue.Value)"
+            Write-Log "Ended up as: $key = $($targetValue.Value)"
 
         }
 
@@ -628,7 +672,7 @@ function UninstallPrinterByName {
     ###
 
     If ($PrinterName -eq "zz"){
-        Write-Host "PrinterName is still the default 'zz'. Please specify a valid PrinterName. Exiting!" #"ERROR"
+        Write-Log "PrinterName is still the default 'zz'. Please specify a valid PrinterName. Exiting!" #"ERROR"
         Exit 1
     }
 
@@ -636,8 +680,8 @@ function UninstallPrinterByName {
     #$PrinterName = "Auckland"
 
     # Main install command:
-    Write-Host ""
-    Write-Host "UNINSTALL COMMAND" -ForegroundColor Yellow
+    Write-Log ""
+    Write-Log "UNINSTALL COMMAND" -ForegroundColor Yellow
     $CustomNameModifier = "Uninstall-Printer-Name.$PrinterName"
     $InstallCommand = New-IntuneGitRunnerCommand `
         -RepoNickName "$RepoNickName" `
@@ -666,8 +710,8 @@ function UninstallPrinterByName {
         DetectPrinterScript = $DetectPrinterScript
     }
 
-    Write-host "Return values prepared."
-    $ReturnHash.Keys | ForEach-Object { Write-Host "   $_ : $($ReturnHash[$_])" }   
+    Write-Log "Return values prepared."
+    $ReturnHash.Keys | ForEach-Object { Write-Log "   $_ : $($ReturnHash[$_])" }   
     Return $ReturnHash
 
     #>
@@ -681,13 +725,13 @@ function UninstallPrinterByName {
     $script:GI_UninstallPrinterScript      = $UninstallPrinterScript
 
     # Just for visibility, still log what we *think* we produced
-    Write-Host "Return values prepared."
-    Write-Host "   UninstallCommand     : $script:GI_UninstallCommand"
-    Write-Host "   UninstallCommandTXT  : $script:GI_UninstallCommandTXT"
-    Write-Host "   UninstallPrinterScript  : $script:GI_UninstallPrinterScript"
+    Write-Log "Return values prepared."
+    Write-Log "   UninstallCommand     : $script:GI_UninstallCommand"
+    Write-Log "   UninstallCommandTXT  : $script:GI_UninstallCommandTXT"
+    Write-Log "   UninstallPrinterScript  : $script:GI_UninstallPrinterScript"
 
-    Write-Host "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END"
-    Write-host ""
+    Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END"
+    Write-Log ""
 
     $Script:HashPattern = "UninstallPrinterByName"
 
@@ -714,57 +758,57 @@ function InstallAppWithJSON {
 
 
     )
-    Write-Host "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START" -ForegroundColor Yellow
-    Write-Host "Generating Install script for App with JSON..." -ForegroundColor Yellow
-    Write-Host "Function parameters received:"
+    Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START" -ForegroundColor Yellow
+    Write-Log "Generating Install script for App with JSON..." -ForegroundColor Yellow
+    Write-Log "Function parameters received:"
     # Check the returned hashtable
     #if(($FunctionParams -eq $null) -or ($FunctionParams.Count -eq 0)){
     # if(($FunctionParams -eq $null)){
-    #     Write-Host "No data returned! Checking if an app was explicitly specified..." #"ERROR"
+    #     Write-Log "No data returned! Checking if an app was explicitly specified..." #"ERROR"
     #     if(-not $ApplicationName){
-    #         Write-Host "No app specified. Exiting!" #"ERROR"
+    #         Write-Log "No app specified. Exiting!" #"ERROR"
     #         Exit 1
 
     #     } else {
             
-    #         Write-Host "App specified as: $ApplicationName"
+    #         Write-Log "App specified as: $ApplicationName"
 
     #     }
     # } else {
 
-    #     Write-Host "Values retrieved:"
+    #     Write-Log "Values retrieved:"
     #     foreach ($key in $FunctionParams.Keys) {
     #         $value = $FunctionParams[$key]
-    #         Write-Host "   $key : $value"
+    #         Write-Log "   $key : $value"
     #     }    
 
     #     # Turn the returned hashtable into variables
-    #     Write-Host "Setting values as local variables..."
+    #     Write-Log "Setting values as local variables..."
     #     foreach ($key in $FunctionParams.Keys) {
     #         Set-Variable -Name $key -Value $FunctionParams[$key] -Scope Local
     #         # Write-Log "Should be: $key = $($ReturnHash[$key])"
     #         $targetValue = Get-Variable -Name $key -Scope Local
-    #         Write-Host "Ended up as: $key = $($targetValue.Value)"
+    #         Write-Log "Ended up as: $key = $($targetValue.Value)"
 
     #     }
 
     # }
     
-    Write-Host "App specified as: $ApplicationName"
-    Write-Host "DetectMethod specified as: $DetectMethod"
-    Write-Host "DisplayName specified as: $DisplayName"
-    Write-Host "AppID specified as: $AppID"
+    Write-Log "App specified as: $ApplicationName"
+    Write-Log "DetectMethod specified as: $DetectMethod"
+    Write-Log "DisplayName specified as: $DisplayName"
+    Write-Log "AppID specified as: $AppID"
 
 
     If ($ApplicationName -eq "zz"){
-        Write-Host "AppName is still the default 'zz'. Please specify a valid AppName. Exiting!" #"ERROR"
+        Write-Log "AppName is still the default 'zz'. Please specify a valid AppName. Exiting!" #"ERROR"
         Exit 1
     }
 
 
     # Main install command:
-    Write-Host ""
-    Write-Host "INSTALL COMMAND" -ForegroundColor Yellow
+    Write-Log ""
+    Write-Log "INSTALL COMMAND" -ForegroundColor Yellow
     $CustomNameModifier = "Install-JSON-App.$ApplicationName"
     $installCommand = New-IntuneGitRunnerCommand `
         -RepoNickName "$RepoNickName" `
@@ -785,12 +829,12 @@ function InstallAppWithJSON {
     $InstallCommandTXT = ExportTXT
 
     # Detection script command:
-    Write-Host ""
-    Write-Host "DETECT SCRIPT" -ForegroundColor Yellow
+    Write-Log ""
+    Write-Log "DETECT SCRIPT" -ForegroundColor Yellow
 
     If ($DetectMethod -eq "WinGet"){
 
-        Write-Host "Using WinGet detection method."
+        Write-Log "Using WinGet detection method."
 
         if (-not $AppID){
             Write-Error "AppID must be specified for WinGet detection method."
@@ -814,7 +858,7 @@ function InstallAppWithJSON {
 
     } elseif ( $DetectMethod -eq "MSI_Registry" ) {
 
-        Write-Host "Using MSI Registry detection method."
+        Write-Log "Using MSI Registry detection method."
 
  
         $CustomNameModifier = "Detect-App.MSIRegistry.$ApplicationName"
@@ -858,8 +902,8 @@ function InstallAppWithJSON {
         DetectAppScript = $DetectAppScript
     }
 
-    Write-host "Return values prepared."
-    $ReturnHash.Keys | ForEach-Object { Write-Host "   $_ : $($ReturnHash[$_])" }   
+    Write-Log "Return values prepared."
+    $ReturnHash.Keys | ForEach-Object { Write-Log "   $_ : $($ReturnHash[$_])" }   
     Return $ReturnHash
 
     #>
@@ -875,16 +919,16 @@ function InstallAppWithJSON {
     $script:GI_DetectAppScript       = $DetectAppScript
 
     # Just for visibility, still log what we *think* we produced
-    Write-Host "Return values prepared."
-    Write-Host "   MainInstallCommand     : $script:GI_MainInstallCommand"
-    Write-Host "   MainInstallCommandTXT  : $script:GI_MainInstallCommandTXT"
-    Write-Host "   MainDetectCommand      : $script:GI_MainDetectCommand"
-    Write-Host "   MainDetectCommandTXT   : $script:GI_MainDetectCommandTXT"
-    Write-Host "   InstallAppScript       : $script:GI_InstallAppScript"
-    Write-Host "   DetectAppScript        : $script:GI_DetectAppScript"
+    Write-Log "Return values prepared."
+    Write-Log "   MainInstallCommand     : $script:GI_MainInstallCommand"
+    Write-Log "   MainInstallCommandTXT  : $script:GI_MainInstallCommandTXT"
+    Write-Log "   MainDetectCommand      : $script:GI_MainDetectCommand"
+    Write-Log "   MainDetectCommandTXT   : $script:GI_MainDetectCommandTXT"
+    Write-Log "   InstallAppScript       : $script:GI_InstallAppScript"
+    Write-Log "   DetectAppScript        : $script:GI_DetectAppScript"
 
-    Write-Host "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END"
-    Write-host ""
+    Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END"
+    Write-Log ""
 
     $Script:HashPattern = "InstallAppWithJSON"
 
@@ -903,43 +947,43 @@ function UninstallApp {
 
     )
 
-    Write-Host "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START" -ForegroundColor Yellow
+    Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START" -ForegroundColor Yellow
 
-    Write-Host "Generating Uninstall script for an application..." -ForegroundColor Yellow
+    Write-Log "Generating Uninstall script for an application..." -ForegroundColor Yellow
 
     ###
 
-    Write-Host "Function parameters received:"
+    Write-Log "Function parameters received:"
 
     # Check the returned hashtable
     # if(($FunctionParams -eq $null) -or ($FunctionParams.Count -eq 0)){
 
-    #     Write-Host "No data returned! Checking if a app was explicitly specified..." #"ERROR"
+    #     Write-Log "No data returned! Checking if a app was explicitly specified..." #"ERROR"
 
     #     if(-not $AppName){
 
-    #         Write-Host "No app specified. Exiting!" #"ERROR"
+    #         Write-Log "No app specified. Exiting!" #"ERROR"
     #         Exit 1
 
     #     } else {
-    #         Write-Host "App specified as: $AppName"
+    #         Write-Log "App specified as: $AppName"
     #     }
 
     # } else {
 
-    #     Write-Host "Values retrieved:"
+    #     Write-Log "Values retrieved:"
     #     foreach ($key in $FunctionParams.Keys) {
     #         $value = $FunctionParams[$key]
-    #         Write-Host "   $key : $value"
+    #         Write-Log "   $key : $value"
     #     }    
 
     #     # Turn the returned hashtable into variables
-    #     Write-Host "Setting values as local variables..."
+    #     Write-Log "Setting values as local variables..."
     #     foreach ($key in $FunctionParams.Keys) {
     #         Set-Variable -Name $key -Value $FunctionParams[$key] -Scope Local
     #         # Write-Log "Should be: $key = $($ReturnHash[$key])"
     #         $targetValue = Get-Variable -Name $key -Scope Local
-    #         Write-Host "Ended up as: $key = $($targetValue.Value)"
+    #         Write-Log "Ended up as: $key = $($targetValue.Value)"
 
     #     }
 
@@ -947,15 +991,15 @@ function UninstallApp {
 
     ###
 
-    Write-Host "App specified as: $ApplicationName"
-    Write-Host "UninstallType specified as: $UninstallType"
-    Write-Host "Version specified as: $Version"
-    Write-Host "UninstallString_DisplayName specified as: $UninstallString_DisplayName"
-    Write-Host "WinGetID specified as: $WinGetID"
+    Write-Log "App specified as: $ApplicationName"
+    Write-Log "UninstallType specified as: $UninstallType"
+    Write-Log "Version specified as: $Version"
+    Write-Log "UninstallString_DisplayName specified as: $UninstallString_DisplayName"
+    Write-Log "WinGetID specified as: $WinGetID"
 
 
     If ($ApplicationName -eq $null -or $ApplicationName -eq ""){
-        Write-Host "ApplicationName was not passed within the function parameters or explicityly set. Please specify a valid ApplicationName. Exiting!" #"ERROR"
+        Write-Log "ApplicationName was not passed within the function parameters or explicityly set. Please specify a valid ApplicationName. Exiting!" #"ERROR"
         Exit 1
     }
 
@@ -969,8 +1013,8 @@ function UninstallApp {
     if(!($UninstallString_DisplayName)){ $UninstallString_DisplayName = $null }
 
     # Main install command:
-    Write-Host ""
-    Write-Host "UNINSTALL COMMAND" -ForegroundColor Yellow
+    Write-Log ""
+    Write-Log "UNINSTALL COMMAND" -ForegroundColor Yellow
     $CustomNameModifier = "Uninstall-App.$ApplicationName"
     $InstallCommand = New-IntuneGitRunnerCommand `
         -RepoNickName "$RepoNickName" `
@@ -1004,8 +1048,8 @@ function UninstallApp {
         DetectPrinterScript = $DetectPrinterScript
     }
 
-    Write-host "Return values prepared."
-    $ReturnHash.Keys | ForEach-Object { Write-Host "   $_ : $($ReturnHash[$_])" }   
+    Write-Log "Return values prepared."
+    $ReturnHash.Keys | ForEach-Object { Write-Log "   $_ : $($ReturnHash[$_])" }   
     Return $ReturnHash
 
     #>
@@ -1019,13 +1063,13 @@ function UninstallApp {
     $script:GI_UninstallAppScript      = $UninstallAppScript
 
     # Just for visibility, still log what we *think* we produced
-    Write-Host "Return values prepared."
-    Write-Host "   UninstallCommand     : $script:GI_UninstallCommand"
-    Write-Host "   UninstallCommandTXT  : $script:GI_UninstallCommandTXT"
-    Write-Host "   UninstallAppScript  : $script:GI_UninstallAppScript"
+    Write-Log "Return values prepared."
+    Write-Log "   UninstallCommand     : $script:GI_UninstallCommand"
+    Write-Log "   UninstallCommandTXT  : $script:GI_UninstallCommandTXT"
+    Write-Log "   UninstallAppScript  : $script:GI_UninstallAppScript"
 
-    Write-Host "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END"
-    Write-host ""
+    Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END"
+    Write-Log ""
 
     $Script:HashPattern = "UninstallApp"
 
@@ -1045,36 +1089,36 @@ function UninstallApp {
 
 # Choose what function to run here:
 # TODO: Make this a selectable menu
-#Write-Host "Generating Intune Install Commands from function: $DesiredFunction..."
-#Write-Host ""
-Write-Host ""
+#Write-Log "Generating Intune Install Commands from function: $DesiredFunction..."
+#Write-Log ""
+Write-Log ""
 
-Write-Host "SCRIPT: $ThisFileName | DESIRED FUNCTION: $DesiredFunction | PARAMS: $FunctionParams | START"
+Write-Log "SCRIPT: $ThisFileName | DESIRED FUNCTION: $DesiredFunction | PARAMS: $FunctionParams | START"
 
-Write-Host ""
+Write-Log ""
 # Output all vars to command line for debugging
-Write-Host "`n--- Input Parameters ---`n"
+Write-Log "--- Input Parameters ---"
 Foreach ($var in $PSBoundParameters.GetEnumerator()) {
-    Write-Host "$($var.Key): $($var.Value)"
+    Write-Log "$($var.Key): $($var.Value)"
 }
-Write-Host "`n--- End Input Parameters ---`n"
-Write-Host ""
+Write-Log "--- End Input Parameters ---"
+Write-Log ""
 
-# Write-Host "Function Parameters:"
+# Write-Log "Function Parameters:"
 # @FunctionParams
 
 <#
 $ReturnHash = & $DesiredFunction @FunctionParams
 
 
-Write-host "Values to return to caller."
-$ReturnHash.Keys | ForEach-Object { Write-Host "   $_ : $($ReturnHash[$_])" }   
-Write-host ""
-Write-Host "SCRIPT: $ThisFileNameName | DESIRED FUNCTION: $DesiredFunction | PARAMS: $FunctionParams | END"
+Write-Log "Values to return to caller."
+$ReturnHash.Keys | ForEach-Object { Write-Log "   $_ : $($ReturnHash[$_])" }   
+Write-Log ""
+Write-Log "SCRIPT: $ThisFileNameName | DESIRED FUNCTION: $DesiredFunction | PARAMS: $FunctionParams | END"
 
 Return $ReturnHash
 
-#Write-Host "End of script."
+#Write-Log "End of script."
 # Return something
 
 #>
@@ -1085,22 +1129,22 @@ if ($DesiredFunction -eq $null -or $DesiredFunction -eq ""){
 
 }
 
-Write-Host ""
-Write-Host "Invoking function: $DesiredFunction ..."
-Write-Host ""
+Write-Log ""
+Write-Log "Invoking function: $DesiredFunction ..."
+Write-Log ""
 # Invoke the selected function and capture its result
 $result = & $DesiredFunction @FunctionParams
 
-# Write-host ""
-# Write-Host "Function '$DesiredFunction' returned: "  
+# Write-Log ""
+# Write-Log "Function '$DesiredFunction' returned: "  
 # $result
-Write-host ""
+Write-Log ""
 
 # If the function indicates that we need to build the final hashtable, do so
 if ($result -eq "BuildMe") {
 
     if ($Script:HashPattern -eq "InstallAppWithJSON") {
-        Write-Host "Building return hashtable for InstallAppWithJSON..."
+        Write-Log "Building return hashtable for InstallAppWithJSON..."
 
         $result = @{
             MainInstallCommand     = $script:GI_MainInstallCommand
@@ -1114,7 +1158,7 @@ if ($result -eq "BuildMe") {
 
     } elseif($Script:HashPattern -eq "InstallPrinterByIP") {
 
-        Write-Host "Building return hashtable for InstallPrinterByIP..."
+        Write-Log "Building return hashtable for InstallPrinterByIP..."
 
         $result = @{
             MainInstallCommand     = $script:GI_MainInstallCommand
@@ -1128,7 +1172,7 @@ if ($result -eq "BuildMe") {
 
     } elseif($Script:HashPattern -eq "UninstallPrinterByName") {
 
-        Write-Host "Building return hashtable for UninstallPrinterByName..."
+        Write-Log "Building return hashtable for UninstallPrinterByName..."
 
         $result = @{
             UninstallCommand     = $script:GI_UninstallCommand
@@ -1139,7 +1183,7 @@ if ($result -eq "BuildMe") {
 
     } elseif($Script:HashPattern -eq "UninstallApp"){
 
-        Write-Host "Building return hashtable for UninstallApp..."
+        Write-Log "Building return hashtable for UninstallApp..."
 
         $result = @{
             UninstallCommand     = $script:GI_UninstallCommand
@@ -1162,29 +1206,29 @@ if ($result -eq "BuildMe") {
 
     }Else{
 
-        Write-Host "Unknown HashPattern: $($Script:HashPattern). Cannot build return hashtable!" -ForegroundColor Red
+        Write-Log "Unknown HashPattern: $($Script:HashPattern). Cannot build return hashtable!" -ForegroundColor Red
         Exit 1
 
     }
 
-    #Write-Host "SCRIPT: $ThisFileName | | START" -ForegroundColor Yellow
+    #Write-Log "SCRIPT: $ThisFileName | | START" -ForegroundColor Yellow
 
-    Write-host ""
+    Write-Log ""
 
 
-    Write-Host "Values to return to caller."
+    Write-Log "Values to return to caller."
     foreach ($key in $result.Keys) {
-        Write-Host "   $key : $($result[$key])"
+        Write-Log "   $key : $($result[$key])"
     }
 
-    #Write-Host "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END | Returning hashtable above to caller."
-    Write-Host "SCRIPT: $ThisFileName | DESIRED FUNCTION: $DesiredFunction | PARAMS: $FunctionParams | END"
+    #Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END | Returning hashtable above to caller."
+    Write-Log "SCRIPT: $ThisFileName | DESIRED FUNCTION: $DesiredFunction | PARAMS: $FunctionParams | END"
 
     return $result
 
 }
 
-Write-Host ""
-Write-Host "SCRIPT: $ThisFileName | DESIRED FUNCTION: $DesiredFunction | PARAMS: $FunctionParams | END"
+Write-Log ""
+Write-Log "SCRIPT: $ThisFileName | DESIRED FUNCTION: $DesiredFunction | PARAMS: $FunctionParams | END"
 
 return $result
