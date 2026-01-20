@@ -3,8 +3,9 @@
 
 Param(
 
-    [string]$z,
-    [string]$WorkingDirectory= "C:\ProgramData\PowerDeploy" # This is one of the few scripts that needs this param explicitly set. It is ran independently from InTune and doesn't inherit this param from anywhere.
+    [string]$PrinterName,
+    [string]$WorkingDirectory#= "C:\ProgramData\PowerDeploy" # This is one of the few scripts that needs this param explicitly set. It is ran independently from InTune and doesn't inherit this param from anywhere.
+
 )
 
 
@@ -53,6 +54,11 @@ function Write-Log {
 ##########
 
 Write-Log "SCRIPT: $ThisFileName | START"
+
+if ($PrinterName -eq $null -or $PrinterName -eq "")  {
+    Write-Log "SCRIPT: $ThisFileName | ERROR | PrinterName parameter is missing." "ERROR"
+    Exit 1
+}
 
 # Try modern method
 Write-log "SCRIPT: $ThisFileName | Checking (using Get-Printer) for printer named: $PrinterName"
