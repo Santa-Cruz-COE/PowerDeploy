@@ -3716,7 +3716,7 @@ Push-Location $RepoRoot
 
     Write-Log "Dot sourcing Git Runner template script located at: $GitRunnerTemplate_ScriptPath" "INFO2"
 
-    & { # Run in a script block to avoid scope issues
+    & { # Run in a script block to avoid scope issues. Using ZZ as a dummy value for RepoURL since we are only updating local repo. Not the cleanest way to do this but it works for now. TODO: Clean up this method in the future.
         . $GitRunnerTemplate_ScriptPath -RepoURL "ZZ" -RepoNickName $ThisRepoNickName -WorkingDirectory $WorkingDirectory -UpdateLocalRepoOnly $true
 
         CheckAndInstall-Git
@@ -3854,6 +3854,17 @@ if ($gitCommit -eq $gitCommitRemote) {
 
 }
 
+if ($Updated -eq $True) {
+
+    Write-Log ""
+    Write-Log "Since the repo was updated, it is recommended to re-run this setup script to ensure all components are up to date." "WARNING"
+    Write-Log ""
+    Write-Log "Exiting now. Please re-run the Setup.ps1 script." "WARNING"
+    Pause
+    Exit 0
+
+}
+
 Pop-Location 
 
 Write-Log ""
@@ -3867,11 +3878,6 @@ Write-Log "==============================================="
 Write-Log ""
 Write-Log "Info:"
 Write-Log ""
-if ($Updated) {
-    Write-Log " - Repo was updated to latest version."
-} else {
-    Write-Log " - No new updates found."
-}
 Write-Log " - Operational Mode: $PerceivedMode"
 Write-Log " - Commit Version: $gitCommit"
 Write-Log ""

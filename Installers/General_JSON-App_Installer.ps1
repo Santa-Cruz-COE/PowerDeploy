@@ -40,6 +40,8 @@ $DownloadAzureBlobSAS_ScriptPath = "$RepoRoot\Downloaders\DownloadFrom-AzureBlob
 
 $MSIinstallScriptPath = "$RepoRoot\Installers\General_MSI_Installer.ps1"
 
+$EXEInstallScriptPath = "$RepoRoot\Installers\General_EXE_Installer.ps1"
+
 ###############
 ## FUNCTIONS ##
 ###############
@@ -179,14 +181,122 @@ Function InstallApp-via-MSI-Private-AzureBlob {
 
     $MSIPath2 = $MSIPathFromContainerRoot.Replace('/', '\')
 
-    if ($InstallArgs) {
-        Write-Log "Using custom install arguments: $InstallArgs"
-        & $MSIinstallScriptPath -MSIPath "$WorkingDirectory\TEMP\Downloads\$MSIPath2" -InstallArgs $InstallArgs -WorkingDirectory $WorkingDirectory -AppName $TargetAppName -DisplayName $DisplayName
+    Try {
+        if ($InstallArgs) {
+            Write-Log "Using custom install arguments: $InstallArgs"
+            & $MSIinstallScriptPath -MSIPath "$WorkingDirectory\TEMP\Downloads\$MSIPath2" -InstallArgs $InstallArgs -WorkingDirectory $WorkingDirectory -AppName $TargetAppName -DisplayName $DisplayName
 
-    } else {
-        & $MSIinstallScriptPath -MSIPath "$WorkingDirectory\TEMP\Downloads\$MSIPath2" -WorkingDirectory $WorkingDirectory -AppName $TargetAppName -DisplayName $DisplayName
+        } else {
+            & $MSIinstallScriptPath -MSIPath "$WorkingDirectory\TEMP\Downloads\$MSIPath2" -WorkingDirectory $WorkingDirectory -AppName $TargetAppName -DisplayName $DisplayName
+
+        }
+    } Catch {
+
+        Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END | MSI installation failed: $_" "ERROR"
+        Exit 1
 
     }
+
+    Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END"
+
+}
+
+Function InstallApp-via-EXE-Private-AzureBlob {
+
+    # Works
+
+    # Download the custom MSI from Azure Blob Storage
+    Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START | Downloading MSI from Private Azure Blob Storage..."
+
+
+    $EXEPathFromContainerRoot
+
+    $EXEname = Split-Path $EXEPathFromContainerRoot -Leaf
+
+    # Grab organization custom registry values
+    Try{
+    # Grab organization custom registry values
+        Write-Log "Retrieving organization custom registry values..." 
+        $ReturnHash = & $OrgRegReader_ScriptPath #| Out-Null
+
+        # Check the returned hashtable
+        if(($ReturnHash -eq $null) -or ($ReturnHash.Count -eq 0)){
+            Write-Log "No data returned from Organization Registry Reader script!" "ERROR"
+            Exit 1
+        }
+        #Write-Log "Organization custom registry values retrieved:"
+        foreach ($key in $ReturnHash.Keys) {
+            $value = $ReturnHash[$key]
+            Write-Log "   $key : $value" 
+        }    
+
+        # Turn the returned hashtable into variables
+        Write-Log "Setting organization custom registry values as local variables..." 
+        foreach ($key in $ReturnHash.Keys) {
+            Set-Variable -Name $key -Value $ReturnHash[$key] -Scope Local
+            Write-Log "Should be: $key = $($ReturnHash[$key])" 
+            $targetValue = Get-Variable -Name $key -Scope Local
+            Write-Log "Ended up as: $key = $($targetValue.Value)" 
+
+        }
+    } Catch {
+        Write-Log "Error retrieving organization custom registry values: $_" "ERROR"
+        Exit 1
+    }
+
+    # Construct blob URI
+
+    $parts = $ApplicationDataJSONpath -split '/', 2
+
+    $ApplicationData_JSON_ContainerName = $parts[0]      
+    $ApplicationData_JSON_BlobName = $parts[1]
+
+    $SasToken = $ApplicationContainerSASkey
+
+    Write-Log "Final values to be used to build $MSIname URI:" 
+    Write-Log "StorageAccountName: $StorageAccountName"
+    Write-Log "SasToken: $SasToken"
+    Write-Log "ApplicationData_JSON_ContainerName: $ApplicationData_JSON_ContainerName"
+    Write-Log "ApplicationData_JSON_BlobName: $ApplicationData_JSON_BlobName"
+
+    $applicationJSONUri = "https://$StorageAccountName.blob.core.windows.net/$ApplicationData_JSON_ContainerName/$EXEPathFromContainerRoot"+"?"+"$SasToken"
+
+    Write-Log "Attempting to access ApplicationData.json with this URI: $applicationJSONUri"
+
+    Try{
+
+
+        Write-Log "Beginning download..."
+        & $DownloadAzureBlobSAS_ScriptPath -WorkingDirectory $WorkingDirectory -BlobName $EXEPathFromContainerRoot -StorageAccountName $StorageAccountName -ContainerName $ApplicationData_JSON_ContainerName -SasToken $SasToken
+        if($LASTEXITCODE -ne 0){Throw $LASTEXITCODE }
+
+
+    }catch{
+
+        Write-Log "Download MSI failed. Exit code returned: $_"
+        Exit 1
+        
+    }
+    
+    # Install the MSI
+
+    Write-Log "Calling General_EXE_Installer script to install $EXEname..."
+
+    $EXEPath2 = $EXEPathFromContainerRoot.Replace('/', '\')
+
+    Try {
+
+        & $EXEinstallScriptPath -EXEPath "$WorkingDirectory\TEMP\Downloads\$EXEPath2" -ArgumentList $InstallArgs -WorkingDirectory $WorkingDirectory -AppName $TargetAppName -DisplayName $DisplayName -ExpectedExitCodes $ExpectedExitCodes
+
+        if($LASTEXITCODE -ne 0){Throw $LASTEXITCODE }
+
+    } Catch {
+
+        Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END | EXE installation failed: $_" "ERROR"
+        Exit 1
+
+    }
+
 
     Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END"
 
@@ -415,6 +525,11 @@ Function InstallRunner {
         Write-Log "Beginning installation via MSI from Private Azure Blob..."
         InstallApp-via-MSI-Private-AzureBlob
 
+    } elseif ($InstallMethod -eq "EXE-Private-AzureBlob") {
+
+        Write-Log "Beginning installation via EXE from Private Azure Blob..."
+        InstallApp-via-EXE-Private-AzureBlob
+
     } elseif ($InstallMethod -eq "MSI-Online") {
 
         Write-Log "Beginning installation via MSI from Online source..."
@@ -425,7 +540,7 @@ Function InstallRunner {
         Write-Log "Beginning installation via Custom Script..."
         InstallApp-via-CustomScript
 
-    } else {
+    } else { # TODO: Make this "$InstallMethod" able to be the direct name of the function to call
 
         Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | Unknown installation method specified: $InstallMethod" "ERROR"
         Exit 1

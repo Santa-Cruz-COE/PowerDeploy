@@ -94,6 +94,12 @@
     "UninstallType": "All",
     "WinGetID": "Microsoft.Office",
     "DisplayName": "Microsoft Office"
+  },
+  {
+    "ApplicationName": "Custom_RMM_Installer_Example",
+    "InstallMethod": "EXE-Private-AzureBlob",
+    "EXEPathFromContainerRoot":"RMM/AGENT.EXE",
+    "DisplayName":"Remote Monitoring Agent"
   }
   ]
 }
