@@ -7,7 +7,8 @@
 Param(
 
     [string]$AppToDetect,# = "Dell Command Update", # ENTER THE NICK NAME OF THE APPLICATION TO DETECT HERE    
-    [string]$WorkingDirectory= "C:\ProgramData\PowerDeploy", # This is one of the few scripts that needs this param explicitly set. It is ran independently from InTune and doesn't inherit this param from anywhere.
+    [Parameter(Mandatory=$true)]
+    [string]$WorkingDirectory, # This is one of the few scripts that needs this param explicitly set. It is ran independently from InTune and doesn't inherit this param from anywhere.
     [string]$AppID,# = "Dell.CommandUpdate", # ENTER THE EXACT WINGET APP ID HERE
     [String]$DisplayName,# = "Dell Command Update", # ENTER THE DISPLAY NAME TO SEARCH FOR IN REGISTRY OR AppXProvisionedPackage HERE,
     [String]$AppXpackageName, # ENTER THE EXACT APPX PACKAGE NAME HERE
@@ -179,6 +180,7 @@ Function TestWinGet {
 
 }
 
+# TODO: Could I just use the pre-existing script for WinGet install or does this script really need to be fully independent?
 Function Check-WinGet{
 
     # TODO: I should turn this into sub-functions...
@@ -872,9 +874,27 @@ Function Detect--AppXPackageInstalled {
 
         Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | No AppXpackageName supplied for AppXpackage detection. Will attempt to use DisplayName and NickName." "WARNING"
 
-        $Detection1 = Get-AppxPackage -AllUsers $AppToDetect
+        Try {
 
-        $Detection2 = Get-AppxPackage -AllUsers $DisplayName
+            Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | Attempting to use nickname: $AppToDetect"
+            $Detection1 = Get-AppxPackage -AllUsers -Name $AppToDetect
+
+        } Catch {
+
+            Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | Error attempting to use nickname: $AppToDetect. Error: $_" "WARNING"
+            $Detection1 = $null
+        }
+
+        Try {
+
+            Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | Attempting to use DisplayName: $DisplayName"
+            $Detection2 = Get-AppxPackage -AllUsers -Name $DisplayName
+
+        } Catch {
+
+            Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | Error attempting to use DisplayName: $DisplayName. Error: $_" "WARNING"
+            $Detection2 = $null
+        }
 
         if ($Detection1 -ne $null){
 
@@ -898,7 +918,7 @@ Function Detect--AppXPackageInstalled {
         
         Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | Searching for application as AppX package: $AppXpackageName"
 
-        $Detection = Get-AppxPackage -AllUsers $AppXpackageName
+        $Detection = Get-AppxPackage -AllUsers -Name$AppXpackageName
 
         if ($Detection -ne $null){
 
@@ -925,6 +945,7 @@ Function Detect--AppXPackageInstalled {
 
 }
 
+# TODO: Bring up to speed with the non provisiond function
 Function Detect--AppXProvisionedPackageInstalled {
 
     Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | Searching for application as AppX Provisioned package: $AppToDetect"
@@ -966,6 +987,39 @@ Function Detect--AppXProvisionedPackageInstalled {
 
 
 
+
+}
+
+Function Detect--CIM {
+
+    Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | Searching for application as CIM instance"
+
+    Try {
+
+        Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | Attempting detection by AppToDetect: $AppToDetect"
+        $Detection1 = Get-CimInstance -ClassName Win32_Product | Where-Object { $_.Name -like "$AppToDetect*"} | Select-object name
+
+
+        Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | Attempting detection by DisplayName: $DisplayName"
+        $Detection2 = Get-CimInstance -ClassName Win32_Product | Where-Object { $_.Name -like "$DisplayName*"} | Select-object name
+
+    } Catch {
+
+        Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | Error during CIM detection: $_" "ERROR"
+        Return 1
+
+    }
+
+    if ($Detection1 -ne $null -or $Detection2 -ne $null){
+        Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | Application detected by CIM Win32_Product" "SUCCESS"
+        Return 0
+
+    } else {
+
+        Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | Application NOT detected by CIM Win32_Product" "WARNING"
+        Return 1
+
+    }
 
 }
 ##########
@@ -1094,7 +1148,13 @@ if ($DetectMethod -eq "WinGet") {
 
     $methods = @("Detect--AppXProvisionedPackageInstalled")
 
-}elseif($DetectMethod -eq "All") {
+}elseif($DetectMethod -eq "CIM") {
+
+    Write-Log "SCRIPT: $ThisFileName | Using CIM detection method."
+
+    $methods = @("Detect--CIM")
+
+} elseif ($DetectMethod -eq "All") {
 
 
     Write-Log "SCRIPT: $ThisFileName | Using ALL detection methods."

@@ -1,0 +1,61 @@
+{
+    "Applications": [
+        {
+            "ApplicationName": "Microsoft.OfficePushNotificationUtility",
+            "DetectMethod": "",
+            "UninstallMethod": ""
+        },
+        {
+            "ApplicationName": "Microsoft.Office.ActionsServer",
+            "DetectMethod": "",
+            "UninstallMethod": ""
+        },
+        {
+            "ApplicationName": "Microsoft.M365Companions",
+            "DetectMethod": "",
+            "UninstallMethod": ""
+        },
+        {
+            "ApplicationName": "Microsoft.MicrosoftOfficeHub",
+            "DetectMethod": "",
+            "UninstallMethod": ""
+        },
+        {
+            "ApplicationName": "",
+            "DetectMethod": "",
+            "UninstallMethod": ""
+        },        
+        {
+            "ApplicationName": "",
+            "DetectMethod": "",
+            "UninstallMethod": ""
+        },        
+        {
+            "ApplicationName": "",
+            "DetectMethod": "",
+            "UninstallMethod": ""
+        },        
+        {
+            "ApplicationName": "",
+            "DetectMethod": "",
+            "UninstallMethod": ""
+        },       
+        {
+            "ApplicationName": "",
+            "DetectMethod": "",
+            "UninstallMethod": ""
+        },        
+        {
+            "ApplicationName": "",
+            "DetectMethod": "",
+            "UninstallMethod": ""
+        },
+        {
+            "ApplicationName": "",
+            "DetectMethod": "",
+            "UninstallMethod": ""
+        }
+
+    ]
+
+}

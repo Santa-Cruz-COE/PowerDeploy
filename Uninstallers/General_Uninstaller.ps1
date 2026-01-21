@@ -120,6 +120,9 @@ $uninstallSuccess = $False
 $RepoRoot = Split-Path -Path $PSScriptRoot -Parent
 $InstallWinGetScript = "$RepoRoot\Installers\Install-WinGet.ps1"
 
+# path to application detection script
+$AppDetectionScriptPath = "$RepoRoot\Templates\Detection-Script-Application_TEMPLATE.ps1"
+
 
 #################
 ### Functions ###
@@ -1385,7 +1388,17 @@ Function Remove-AppxPackage([String]$appName){
 
         Write-Log "Function: $($MyInvocation.MyCommand.Name) | Application Detected as a AppxPackage. Now running uninstaller for: $AppName" "WARNING"
 
-        $packageFullName = $appCheck.PackageFullName
+        [string]$packageFullName = $appCheck.PackageFullName
+
+        Write-Log "Detected PackageFullName: $packageFullName"
+
+        if([string]$packageFullName -Match " ") { # So for some reason I was getting "Microsoft.MicrosoftOfficeHub_19.2601.41041.0_arm64__8wekyb3d8bbweMicrosoft.MicrosoftOfficeHub_19.2601.46121.0_arm64__8wekyb3d8bbwe"... So just gonna add this check as a fail safe
+            # $packageFullName = $appCheck.name
+            $packageFullName = $packageFullName.Split(" ")[0]
+            Write-Log "Adjusted PackageFullName due to space issue: $packageFullName"
+        }
+
+        Write-Log "Using PackageFullName: $packageFullName"
 
         #Remove-AppxPackage -package $packageFullName -AllUsers
 
@@ -1471,125 +1484,6 @@ Function Remove-AppxPackage([String]$appName){
     } 
 }
 
-# UNTESTED, not needed
-Function Remove-AppPackage([String]$appName){
-
-    # I may need to break this in to 2 seperate functions.
-
-    Write-Log "========================================="
-    
-
-    Write-Log "Function: $($MyInvocation.MyCommand.Name) | Begin"
-    Write-Log "Target app: $appName"
-
-    ## Will remove once tested
-    Write-Log "THIS METHOD IS UNTESTED." "WARNING"
-
-    if ($UninstallType -eq 'All'){
-
-        Write-Log "SKIPPING METHOD" "WARNING"
-        Write-Log "========================================="
-
-        Return "Skipped"
-
-    } else {
-
-        Write-Log "Method requested anyways, continuing" "WARNING"
-    }
-    ##
-
-    Write-Log "Part 1 / 2: Checking for AppPackage for $AppName"
-    $appCheck = App-Detector -AppName $AppName -DetectMethod 'AppPackage'
-    $uninstallSuccess1 = $False
-
-    if($appCheck -ne $null){
-
-        Write-Log "Function: $($MyInvocation.MyCommand.Name) | Application Detected as a AppPackage. Now running uninstaller for: $AppName" "WARNING"
-
-        $packageFullName = $appCheck.PackageFullName
-
-        $UninstallCommand_App = "powershell.exe" 
-        $uninstCommand = "Remove-AppPackage -package $packageFullName -AllUsers"
-        $UninstallCommand_Args = "-Command `"$uninstCommand`""
-
-
-
-        if((Command-Runner -UninstallCommand_App $UninstallCommand_App -UninstallCommand_Args $UninstallCommand_Args -DetectMethod 'AppPackage') -eq $true){
-            Write-Log "Function: $($MyInvocation.MyCommand.Name) | Uninstall runner for AppPackage returned success, PART 1 / 2" "SUCCESS"
-            $uninstallSuccess1 = $True
-            
-        } Else {
-            Write-Log "Function: $($MyInvocation.MyCommand.Name) | Uninstall runner for AppPackage returned failure, PART 1 / 2" "ERROR"
-            $uninstallSuccess1 = $False
-            
-        }
-
-    }
-    else{
-        Write-Log "Function: $($MyInvocation.MyCommand.Name) | $appName as a AppPackage is not installed on this computer!" "WARNING"
-        $uninstallSuccess1 = "NotFound"
-    }
-
-
-    
-    Write-Log "Part 2 / 2: Checking for AppProvisionedPackage for $appName"
-    $provApp = Get-AppProvisionedPackage -Online 
-    $proPackageFullName = (Get-AppProvisionedPackage -Online | where {$_.Displayname -eq $appName}).DisplayName
-    $appCheck2 = App-Detector -AppName $AppName -DetectMethod 'AppProvisionedPackage'
-    $uninstallSuccess2 = $False
-    $uninstall2needed = $false
-    if($appCheck2 -ne $null){
-
-        $uninstall2needed = $True
-        Write-Log "Function: $($MyInvocation.MyCommand.Name) | Application Detected as a AppProvisionedPackage. Now running uninstaller for: $AppName" "WARNING"
-
-        $UninstallCommand_App = "powershell.exe" 
-        $uninstCommand = "Remove-AppProvisionedPackage -online -packagename $proPackageFullName -AllUsers"
-        $UninstallCommand_Args = "-Command `"$uninstCommand`""
-
-
-        
-        if((Command-Runner -UninstallCommand_App $UninstallCommand_App -UninstallCommand_Args $UninstallCommand_Args -DetectMethod 'AppProvisionedPackage') -eq $true){
-            Write-Log "Function: $($MyInvocation.MyCommand.Name) | Uninstall runner for AppProvisionedPackage returned success, PART 2 / 2" "SUCCESS"
-            $uninstallSuccess2 = $True
-            
-        } Else {
-            Write-Log "Function: $($MyInvocation.MyCommand.Name) | Uninstall runner for AppProvisionedPackage returned failure, PART 2 / 2" "ERROR"
-            $uninstallSuccess2 = $False
-            
-        }
-        
-    } else {
-
-        Write-Log "Function: $($MyInvocation.MyCommand.Name) | $appName as a AppProvisionedPackage is not installed on this computer!" "WARNING"
-        $uninstallSuccess2 = "NotFound"
-
-    }
-
-    Write-Log "Function: $($MyInvocation.MyCommand.Name) | End"
-    Write-Log "========================================="
-    
-
-    # Evaluate results
-    if($uninstallSuccess1 -eq $true -and $uninstallSuccess2 -eq $true){
-
-        Return $True
-
-    }elseif($uninstall2needed -eq $false -and $uninstallSuccess1 -eq $true){
-
-        Return $True
-
-    } elseif ($uninstallSuccess1 -eq "NotFound" -and $uninstallSuccess2 -eq "NotFound"){
-
-        Return "NotFound"
-
-    } else {
-
-        Return $False
-
-    } 
-}
-
 # TESTED
 Function Remove-App-WinGet([String]$appName){
 
@@ -1617,11 +1511,11 @@ Function Remove-App-WinGet([String]$appName){
 
         if($Version -eq $null -or $Version -eq ""){
 
-            $UninstallCommand_Args = "uninstall --id $AppName --exact --silent --accept-source-agreements --all-versions"
+            $UninstallCommand_Args = "uninstall --id $AppName --exact --silent --accept-source-agreements --disable-interactivity --all-versions --force"
 
         }else{
 
-            $UninstallCommand_Args = "uninstall --id $AppName --exact --silent --accept-source-agreements --version $Version"
+            $UninstallCommand_Args = "uninstall --id $AppName --exact --silent --accept-source-agreements --disable-interactivity --version $Version --force"
         }
 
         $UninstallCommand_App = $WinGet
@@ -2006,8 +1900,8 @@ if ($Methods -contains $UninstallType) {
         Write-Log "Attempting to call uninstall method: $ChosenMethod"
         $result = & $ChosenMethod -appName $AppName
 
-            if ($result) {
-                Write-Log "Uninstallation completed successfully" "SUCCESS"
+            if ($result -eq $True) {
+                Write-Log "Uninstallation completed successfully with method $ChosenMethod" "SUCCESS"
                 $successfulMethods += $ChosenMethod
                 $uninstallSuccess = $True
 
@@ -2021,7 +1915,7 @@ if ($Methods -contains $UninstallType) {
                 Write-Log "Uninstall method $ChosenMethod was skipped" "WARNING"
 
             }else {
-                Write-Log "Uninstallation attempt with $ChosenMethod failed" "ERROR"
+                Write-Log "Uninstallation attempt with $ChosenMethod failed. Received result: $Result" "ERROR"
                 
             }
         Write-Log "Moving to next method."
@@ -2062,9 +1956,16 @@ if ($Methods -contains $UninstallType) {
 # Return final verdict with appropriate exit code]
 
 # TODO: Return a final ultra check using all methods
-Write-Log "Final check"
-if((Test-AllDetectionMethods -AppName $AppName) -eq $True){
+Write-Log "SCRIPT: $ThisFileName | FINAL CHECK for app: $AppName using script: $AppDetectionScriptPath"
+if (!($packageFullName)) {
+    $packageFullName = $null
+}
+# NOTE: Using the external detection script for the final check, was having issues with the internal function and this is the direction we need to go anyways.
+& $AppDetectionScriptPath -AppToDetect $AppName -DetectMethod 'All' -AppID $WinGetID -DisplayName $UninstallString_DisplayName -AppXpackageName $packageFullName -WorkingDirectory $WorkingDirectory
 
+# if((Test-AllDetectionMethods -AppName $AppName) -eq $True){
+if($LASTEXITCODE -eq 0){
+    
     Write-Log "Detect all method found the target app" "ERROR"
     $uninstallSuccess = $False
 

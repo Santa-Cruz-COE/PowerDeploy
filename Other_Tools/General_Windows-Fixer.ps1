@@ -6,8 +6,8 @@
 
 Param (
 
-    $WorkingDirectory="C:\ProgramData\PowerDeploy"
-
+    [Parameter(Mandatory=$true)]
+    $WorkingDirectory
 )
 
 ##########

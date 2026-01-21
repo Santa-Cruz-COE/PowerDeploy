@@ -6,6 +6,14 @@
     "WinGetID": "Microsoft.VisualStudioCode"
   },
   {
+    "ApplicationName": "Microsoft_Office_Default",
+    "InstallMethod": "Custom_Script",
+    "ScriptPathFromRepoRoot": "Installers\\InstallApp-MS_Office-FullClean.ps1",
+    "UninstallType": "All",
+    "WinGetID": "Microsoft.Office",
+    "DisplayName": "Microsoft 365 Apps for enterprise - en-us"
+  },
+  {
     "ApplicationName": "Adobe_Creative_Cloud",
     "InstallMethod": "WinGet",
     "WinGetID": "Adobe.CreativeCloud"
@@ -77,6 +85,15 @@
     "InstallMethod": "WinGet",
     "WinGetID": "TESTESTEST",
     "PreRequisites":"Google_Chrome,7zip,Dell_CommandUpdate"
+  },
+  {
+    "ApplicationName": "Custom_Office_Install_Example",
+    "InstallMethod": "Custom_Script",
+    "ScriptPathFromRepoRoot": "Installers\\InstallApp-MS_Office-FullClean.ps1",
+    "CustomScriptArgs": "-CustomSetupZipBlobPath \"Microsoft_Office/CustomOfficeSetup.zip\" -ConfigFileName \"configuration.xml\"",
+    "UninstallType": "All",
+    "WinGetID": "Microsoft.Office",
+    "DisplayName": "Microsoft Office"
   }
   ]
 }

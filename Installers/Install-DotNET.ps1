@@ -55,7 +55,8 @@ param(
     [Parameter(Mandatory=$true)]
     [string]$Version,
 
-    [string]$WorkingDirectory="C:\ProgramData\PowerDeploy",
+    [Parameter(Mandatory=$true)]
+    [string]$WorkingDirectory,
 
     [Parameter(Mandatory=$false)]
     [ValidateSet("Desktop", "SDK", "AspNet", "Runtime")]

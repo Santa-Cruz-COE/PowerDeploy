@@ -206,9 +206,6 @@ Function InstallApp-via-CustomScript {
 
     $CustomScriptPath = "$RepoRoot\$ScriptPathFromRepoRoot"
 
-
-
-
     if ($CustomScriptArgs)
     {
         Write-Log "Passing script arguments: $CustomScriptArgs"
