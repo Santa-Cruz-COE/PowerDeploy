@@ -510,7 +510,7 @@ function Install-EXEPackage {
         }
         
         # Check if exit code is in the list of expected success codes
-        if ($SuccessExitCodes -contains $exitCode) {
+        if ($SuccessExitCodes -contains $exitCode -and $exitCode -ne $null -and $exitCode -ne "") {
             Write-Log "Exit code $exitCode is in expected success codes" "SUCCESS"
             
             if ($exitCode -eq 3010) {
