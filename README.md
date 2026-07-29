@@ -4,7 +4,7 @@
 
 # PowerDeploy
 
-> **Note:** This README were drafted mostly with AI. It aims to describe the project accurately, but is archaic and messy. Treat it as an evolving overview rather than exhaustive reference documentation.
+> **Note:** This README was drafted with AI. It aims to describe the project accurately, but is archaic and messy. Treat it as an evolving overview rather than exhaustive reference documentation.
 
 **PowerDeploy is a PowerShell framework for packaging, deploying, and managing applications and network printers across cloud-managed Windows fleets (Entra ID + Intune).**
 
