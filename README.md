@@ -1,10 +1,36 @@
-<img width="4167" height="1042" alt="powerdeploy_banner_transparent" src="https://github.com/user-attachments/assets/9771a0f8-0b5a-4c8c-b7c9-e45499cdb9c8" />
+<img width="1231" height="265" alt="image" src="https://github.com/user-attachments/assets/433557c1-8995-4e46-87c0-0ff699926e51" />
 
 
 
 # PowerDeploy
 
-> **Note:** This README was drafted with AI. It aims to describe the project accurately, but is archaic and messy. Treat it as an evolving overview rather than exhaustive reference documentation.
+Powerdeploy is an infrastructure framework for core functionalities of your Windows environment.
+
+Key beneficial features include:
+
+- Replace your print server with a reliable, secure, ultralow cost "serverless" solution
+
+- Speed up your app deployments on endpoints
+
+- Increase the reliability of your app deployments
+
+- Increase the available pool of Windows Store apps from 65% to 99.99%
+
+- Flexibility to Install any script or app of any size remotely
+
+- Increase the flexibility and speed of app setup and management
+
+- Use your own app/script/storage hosting solution (local or cloud) rather than relying on Microsoft's black box unreliable crap 
+
+All of these items are measurable and will be benchmarked and presented here thereafter. 
+
+PowerDeploy is intended for use with InTune, but is designed to be flexible with other remote management systems. 
+
+With PowerDeploy in place, your InTune environment can become to a reliable asset.
+
+---
+
+> **Note:** The rest of this README was drafted with AI. It aims to describe the project accurately, but is archaic and messy. Treat it as an evolving overview rather than exhaustive reference documentation.
 
 **PowerDeploy is a PowerShell framework for packaging, deploying, and managing applications and network printers across cloud-managed Windows fleets (Entra ID + Intune).**
 
