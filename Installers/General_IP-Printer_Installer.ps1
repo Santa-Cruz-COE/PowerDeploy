@@ -203,7 +203,18 @@ function Write-Log {
         New-Item -ItemType Directory -Path $logDir -Force | Out-Null
     }
     
-    Add-Content -Path $LogPath -Value $logEntry
+    # Resilient log write: retry an atomic append so a transient AV/EDR file lock
+    # (Defender, CrowdStrike, etc.) cannot throw "Stream was not readable" and spam the
+    # console. Encoding::Default (system ANSI) matches the prior Add-Content behavior.
+    for ($logAttempt = 1; $logAttempt -le 5; $logAttempt++) {
+        try {
+            [System.IO.File]::AppendAllText($LogPath, $logEntry + [Environment]::NewLine, [System.Text.Encoding]::Default)
+            break
+        } catch {
+            if ($logAttempt -eq 5) { break }   # give up quietly after ~160ms of retries
+            Start-Sleep -Milliseconds 40
+        }
+    }
 }
 
 function Set-VariablesFromObject {
@@ -428,6 +439,8 @@ if($GetJSON -eq $True) {
                 if ($var -eq "" -or $var -eq $null){
 
                     Write-Log "Variable missing or empty after JSON parse: $var" "ERROR"
+                    Write-Log 'Required vars: "$PortName","$PrinterIP","$DriverName","$INFFile","$DriverZip' "ERROR"
+
                     Exit 1
 
                 } else {

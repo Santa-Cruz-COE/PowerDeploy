@@ -123,7 +123,13 @@ param(
 ####################
 
 # Handle base64 encoded parameters if provided (for Intune compatibility)
-if ($ScriptParamsBase64 -and -not $ScriptParams) {
+# The base64 payload is authoritative. Generated custom scripts have this param() block
+# stripped, so $ScriptParams is undeclared there and would otherwise resolve to a leftover
+# session/global variable via dynamic scoping - never trust a pre-existing value.
+if ($ScriptParamsBase64) {
+    if ($ScriptParams) {
+        Write-Host "WARNING: A pre-existing ScriptParams value was found and will be ignored. Using the ScriptParamsBase64 payload instead." -ForegroundColor Yellow
+    }
     try {
         Write-Host "Decoding base64 parameters..."
         $decodedJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($ScriptParamsBase64))
@@ -234,7 +240,18 @@ function Write-Log {
         New-Item -ItemType Directory -Path $logDir -Force | Out-Null
     }
     
-    Add-Content -Path $LogPath -Value $logEntry
+    # Resilient log write: retry an atomic append so a transient AV/EDR file lock
+    # (Defender, CrowdStrike, etc.) cannot throw "Stream was not readable" and spam the
+    # console. Encoding::Default (system ANSI) matches the prior Add-Content behavior.
+    for ($logAttempt = 1; $logAttempt -le 5; $logAttempt++) {
+        try {
+            [System.IO.File]::AppendAllText($LogPath, $logEntry + [Environment]::NewLine, [System.Text.Encoding]::Default)
+            break
+        } catch {
+            if ($logAttempt -eq 5) { break }   # give up quietly after ~160ms of retries
+            Start-Sleep -Milliseconds 40
+        }
+    }
 }
 
 # NOTE: This function will not use write-log.

@@ -86,6 +86,9 @@ if ($TemplateScript -eq "GitRunnerScript"){
     $ScriptPath_DEC = '$ScriptPath = '+$ScriptPath
     $ScriptParamsBase64_DEC = '$ScriptParamsBase64 = '+$ScriptParamsBase64
     $StashChanges_DEC = '$StashChanges = $true'
+    # The template's param() block gets stripped below, so explicitly clear $ScriptParams
+    # to keep the script from inheriting a leftover session variable via dynamic scoping
+    $ScriptParamsReset_DEC = '$ScriptParams = $null'
 
 
 # --- config for GitRunnerScript ---
@@ -99,6 +102,7 @@ $NewCode      = @"
     $WorkingDirectory_DEC
     $ScriptPath_DEC
     $StashChanges_DEC
+    $ScriptParamsReset_DEC
     $ScriptParamsBase64_DEC
 
 # --- injected code end ---

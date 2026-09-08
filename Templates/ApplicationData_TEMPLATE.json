@@ -75,6 +75,11 @@
     "WinGetID": "Google.Chrome"
   }, 
   {
+    "ApplicationName": "Company_Portal",
+    "InstallMethod": "WinGet",
+    "WinGetID": "9WZDNCRFJ3PZ"
+  }, 
+  {
     "ApplicationName": "Zoom_Workplace_EXE",
     "InstallMethod": "WinGet",
     "WinGetID": "Zoom.Zoom.EXE"
@@ -94,6 +99,11 @@
     "InstallMethod": "WinGet",
     "WinGetID": "9PMMSR1CGPWG"
   }, 
+  {
+    "ApplicationName": "Logi Options+",
+    "InstallMethod": "WinGet",
+    "WinGetID": "Logitech.OptionsPlus"
+  },
   {
     "ApplicationName": "MSI-Private-AzureBlob_Example",
     "InstallMethod": "MSI-Private-AzureBlob",

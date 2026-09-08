@@ -171,7 +171,18 @@ function Write-Log {
         New-Item -ItemType Directory -Path $logDir -Force | Out-Null
     }
     
-    Add-Content -Path $LogPath -Value $logEntry
+    # Resilient log write: retry an atomic append so a transient AV/EDR file lock
+    # (Defender, CrowdStrike, etc.) cannot throw "Stream was not readable" and spam the
+    # console. Encoding::Default (system ANSI) matches the prior Add-Content behavior.
+    for ($logAttempt = 1; $logAttempt -le 5; $logAttempt++) {
+        try {
+            [System.IO.File]::AppendAllText($LogPath, $logEntry + [Environment]::NewLine, [System.Text.Encoding]::Default)
+            break
+        } catch {
+            if ($logAttempt -eq 5) { break }   # give up quietly after ~160ms of retries
+            Start-Sleep -Milliseconds 40
+        }
+    }
 }
 
 
@@ -442,6 +453,13 @@ function Reg-Read-All {
             catch {
                 # Some keys are protected / weird, just skip them
                 Write-Log "SCRIPT: $ThisFileName | Function: $($MyInvocation.MyCommand.Name) | Values not found for key: $ConvertedKey. Continuing anyways." "WARNING"
+                # KNOWN ISSUE (intentionally left as-is for now): AddValues-To-Hash has no loop
+                # of its own, so this 'continue' does NOT just exit the function. PowerShell
+                # flow-control crosses the function boundary and continues the while() loop in
+                # Reg-Read-All instead. It only works today because child keys are enqueued
+                # BEFORE this function is called. The intended meaning is 'return' (give up on
+                # THIS key). Do NOT move the child-enqueue logic below this call without first
+                # changing this to 'return', or keys will be silently dropped.
                 continue
             }
 
@@ -460,6 +478,10 @@ function Reg-Read-All {
                 $keyTable[$name] = $value
             }
 
+            # KNOWN ISSUE (intentionally left as-is for now): like the 'continue' in the catch
+            # block above, this one also escapes into Reg-Read-All's while() loop rather than
+            # just returning from this function (a side effect is that the "Keys remaining to
+            # process" log line gets skipped for any value-less key). Intended meaning: 'return'.
             if ($keyTable.Count -eq 0) { continue }
 
             # Convert .Name (e.g. 'HKEY_LOCAL_MACHINE\SOFTWARE\PowerDeploy')
