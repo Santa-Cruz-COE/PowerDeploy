@@ -1,5 +1,5 @@
 # General MSI Installer
-# Primarily written by Claude
+# Primarily written by Claude, primarily borrowing from previously written scripts.
 # Working from testing so far. Need to do more testing on InstallArgs. Also it may be capturing exit codes ineffectively.
 
 <#

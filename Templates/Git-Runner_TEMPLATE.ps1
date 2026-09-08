@@ -354,6 +354,12 @@ function Test-PathSyntaxValidity {
 }
 
 function CheckAndInstall-Git {
+
+    # Refresh PATH from the registry before checking — this process may have started before a
+    # previous run installed Git and updated the system PATH, so without this refresh every run
+    # would see "git not found" even though Git is already on disk.
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
         Write-Log "Git not found. Acquiring mutex lock for installation..." "WARNING"
 
@@ -379,7 +385,10 @@ function CheckAndInstall-Git {
 
             Write-Log "Mutex acquired. Checking Git again..."
 
-            # Re-check after acquiring mutex — another instance may have installed Git while waiting
+            # Re-check after acquiring — refresh PATH first so we don't miss a Git install that
+            # another process completed while we were waiting for the mutex.
+            $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+
             if (Get-Command git -ErrorAction SilentlyContinue) {
                 Write-Log "Git was installed by another process while waiting."
                 return
@@ -436,7 +445,7 @@ function CheckAndInstall-Git {
             if ($mutex) {
 
                 $mutex.Dispose()
-               
+
             }
         }
     } else {

@@ -23,7 +23,7 @@
     {
         "PresetDriver":"KM_UPD4_PCL6_WIN_X64",
         "DriverName":"KONICA MINOLTA Universal V4 PCL",
-        "NFFile":"KOBxxK__01.inf",
+        "INFFile":"KOBxxK__01.inf",
         "DriverZip":"printers/Drivers/KonicaMinolta/PCL6/UPD4PCL6Win81P_2802MU_x64ONLY.zip"
     }
   ]

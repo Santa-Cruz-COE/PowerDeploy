@@ -26,6 +26,67 @@ $PrintServerName = $ENV:computername
 # $alreadyThere = $False
 
 
+# --- Helpers --------------------------------------------------------------
+
+# Suggest a PresetDriver "code" (the foreign key that links a printer to the
+# drivers[] section of the JSON) from a raw driver name. This is only a
+# STARTING POINT - review/rename the PresetDriver column in the CSV to match
+# your own naming convention before converting to JSON.
+function Get-PresetDriverCode {
+    param([string]$DriverName)
+
+    if ([string]::IsNullOrWhiteSpace($DriverName)) { return "" }
+
+    # Common vendor prefixes -> your short codes. Extend as needed.
+    $vendorMap = @{
+        'HP'              = 'HP'
+        'Hewlett'         = 'HP'
+        'KONICA MINOLTA'  = 'KM'
+        'Konica'          = 'KM'
+        'Canon'           = 'CANON'
+        'Xerox'           = 'XEROX'
+        'Ricoh'           = 'RICOH'
+        'Brother'         = 'BROTHER'
+        'Lexmark'         = 'LEXMARK'
+        'Epson'           = 'EPSON'
+        'Kyocera'         = 'KYOCERA'
+        'Sharp'           = 'SHARP'
+        'Toshiba'         = 'TOSHIBA'
+    }
+
+    $prefix = $null
+    foreach ($key in $vendorMap.Keys) {
+        if ($DriverName -match [regex]::Escape($key)) { $prefix = $vendorMap[$key]; break }
+    }
+
+    # Build a slug from the whole driver name: keep alphanumerics, collapse the
+    # rest into single underscores.
+    $slug = ($DriverName -replace '[^A-Za-z0-9]+', '_').Trim('_').ToUpper()
+
+    if ($prefix) {
+        # Avoid doubling the prefix if the slug already starts with it.
+        if ($slug -notmatch "^$prefix`_") { $slug = "$prefix`_$slug" }
+    }
+
+    return "$slug`_WIN_X64"
+}
+
+# Zero-pad an IPv4 address to match the "010.009.028.106" PortName style used
+# in the JSON template. Returns "" if the input isn't a clean IPv4 address.
+function Get-PaddedIP {
+    param([string]$IP)
+
+    if ([string]::IsNullOrWhiteSpace($IP)) { return "" }
+    $octets = $IP.Trim() -split '\.'
+    if ($octets.Count -ne 4) { return $IP }
+    try {
+        return ($octets | ForEach-Object { '{0:000}' -f [int]$_ }) -join '.'
+    } catch {
+        return $IP
+    }
+}
+
+
 # Start 
 
 #$PrintServerName = Read-host "Enter the print server you wish to connect to"
@@ -74,13 +135,28 @@ Try {
         # Get printer driver information
         $driver = Get-PrinterDriver -Name $printer.DriverName
     
-        # Create custom object with required properties
+        # Create custom object with required properties.
+        #
+        # Column notes for the reviewer (before running the converter):
+        #   PortName        - ACTIVE column the converter reads. Pre-filled with
+        #                     the zero-padded IP style to match the JSON template.
+        #                     Edit this if you prefer the server's raw port name.
+        #   PortName_Raw    - reference only: the port name as the print server
+        #                     reports it. Copy into PortName if you want it.
+        #   PortName_Padded - reference only: the zero-padded IP form.
+        #   PresetDriver    - SUGGESTED code linking this printer to a driver.
+        #                     Rename to match your convention; printers sharing a
+        #                     driver should share the same PresetDriver value.
+        $paddedIP = Get-PaddedIP -IP $port.PrinterHostAddress
         $printerInfo = [PSCustomObject]@{
-            PortName = $printer.PortName
-            PrinterIP = $port.PrinterHostAddress
-            PrinterName = $printer.Name
-            DriverName = $printer.DriverName
-            INFFile = $driver.InfPath
+            PrinterName     = $printer.Name
+            PrinterIP       = $port.PrinterHostAddress
+            PortName        = if ($paddedIP) { $paddedIP } else { $printer.PortName }
+            PortName_Raw    = $printer.PortName
+            PortName_Padded = $paddedIP
+            PresetDriver    = Get-PresetDriverCode -DriverName $printer.DriverName
+            DriverName      = $printer.DriverName
+            INFFile         = $driver.InfPath
         }
     
         # Add to results array
