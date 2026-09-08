@@ -627,7 +627,7 @@ function Setup--Azure-Printer{
             Write-Log ""
 
 
-            & Install--Local-Printer -PrinterName $PrinterName
+            & Printer--Install-Local -PrinterName $PrinterName
 
             Write-Log ""
 
@@ -798,7 +798,21 @@ function Setup--Azure-Printer{
     Write-Log " 3 - APP INFORMATION:"
     write-log "     - Name: follow your org naming conventions."
     Write-Log "         - What I recommend: ""$PotentialPrinterInTuneName"""
-    Write-Log "     - Description: I recommend including printer name, IP, driver version, location, etc following a common convention for you organization."
+    Write-Log "     - Description: I recommend including printer name, IP, driver version, location, etc following a common convention for you organization. Example:"
+
+    write-host "
+Department: $DEPARTMENT `n
+Asset: $Asset `n
+Location: $Location `n
+`n
+---`n
+`n
+PowerDeploy details:
+$RepoUrl`n
+$Global:RepoBranch`n
+Version: `n
+Verified: `n"
+
     Write-Log "     - Publisher: Your organization name"
     Write-Log "     - Category: Printers (Create this category if you do not already have, it will take some time to show up: https://learn.microsoft.com/en-us/intune/intune-service/apps/apps-add#create-and-edit-categories-for-apps)"
     Write-Log "     - Logo: Optional - You could create something with Canva using your organization logo, but standardize it"
@@ -1155,9 +1169,7 @@ Function Setup--Azure-WindowsApp{
         Write-Log "            - Custom Script Args (if any)"
         Write-Log "    3 - PreRequisites (if any)"
         Write-Log ""
-        Write-Log "Here is an example of what the format of the JSON:"
-        Write-Log ""
-        Write-Host $ExampleAppJSON
+        Write-Log "Look here is an example of JSON format: \Templates\ApplicationData_TEMPLATE.json"
         Write-Log ""
         Write-Log "Add your new application details to the JSON now, following the above format. Save when you are finished." "WARNING"
         Write-Log ""
@@ -1206,7 +1218,7 @@ Function Setup--Azure-WindowsApp{
             Pause
             Write-Log "Proceeding with local installation test for $AppNameToFind..."
 
-            & Install--Local-Application -ApplicationName $AppNameToFind
+            & WindowsApp--Install-Local -ApplicationName $AppNameToFind
 
             if($LASTEXITCODE -ne 0){
                 Write-Log "Local application installation test failed with exit code: $LASTEXITCODE" "ERROR"
