@@ -655,13 +655,85 @@ If (-not $ThrowBad) {
         #Push-Location $TargetDirectory
 
 
+        # --- Locate the INF -------------------------------------------------
+        # Step 1 (unchanged behavior): look for the INF at the root of the
+        # extracted zip. Every DriverZip that works today has it here, so this
+        # fast path keeps existing JSON entries behaving byte-identically.
+        #
+        # Step 2 (new): if it is NOT at the root, search the tree. Raw vendor
+        # packs nest their INFs (e.g. KONICA MINOLTA ships
+        # Driver\PCL\Driver\Win_x64\KOAWOJ__.inf) instead of flattening them,
+        # which previously forced hand-gutting the zip before it could be used.
+        #
+        # Step 3 (new): vendor packs commonly ship the SAME INF filename for
+        # multiple architectures (Win_x64 and Win_x86 both contain
+        # KOAWOJ__.inf). Path depth cannot tell these apart, so disambiguate on
+        # the INF's own [Manufacturer] decoration - "NTamd64" vs "NTx86" - which
+        # is the authoritative architecture marker. Picking the x86 INF on a
+        # 64-bit box installs a driver that cannot be used, so this matters.
+        # Note: HP writes "NTAMD64", KM writes "NTamd64" -> compare case-insensitively.
+
+        $INFLeafName = Split-Path $INFFile -Leaf
         $INFpath = "$EXTRACTED_LocalDriverZipPath\$INFFile"
 
-        # Check for the INF File
-        If (Test-Path $INFpath){
+        If (Test-Path $INFpath) {
+
             Write-Log "INF File found here: $INFpath"
+
         } else {
-            Throw "INF File NOT found here: $INFpath"
+
+            Write-Log "INF not at the root of the extracted zip. Searching subfolders for '$INFLeafName'..." "WARNING"
+
+            $Candidates = @(Get-ChildItem -Path $EXTRACTED_LocalDriverZipPath -Filter $INFLeafName -Recurse -File -ErrorAction SilentlyContinue)
+
+            if ($Candidates.Count -eq 0) {
+
+                # Fail loudly AND show what is actually in the zip - this turns a
+                # dead-end error into an actionable one.
+                Write-Log "INF File '$INFLeafName' NOT found anywhere in: $EXTRACTED_LocalDriverZipPath" "ERROR"
+                Write-Log "INF files that ARE present in this zip:" "ERROR"
+                $Present = @(Get-ChildItem -Path $EXTRACTED_LocalDriverZipPath -Filter *.inf -Recurse -File -ErrorAction SilentlyContinue)
+                if ($Present.Count -eq 0) {
+                    Write-Log "   (none - the zip contains no .inf files at all)" "ERROR"
+                } else {
+                    foreach ($p in $Present) {
+                        Write-Log "   $($p.FullName.Substring($EXTRACTED_LocalDriverZipPath.Length).TrimStart('\'))" "ERROR"
+                    }
+                }
+                Throw "INF File NOT found: $INFLeafName"
+            }
+
+            if ($Candidates.Count -gt 1) {
+
+                Write-Log "Found $($Candidates.Count) copies of '$INFLeafName'. Disambiguating by architecture." "WARNING"
+                foreach ($c in $Candidates) { Write-Log "   candidate: $($c.FullName)" }
+
+                # Prefer the INF whose [Manufacturer] decoration matches this OS.
+                $WantArch = if ([Environment]::Is64BitOperatingSystem) { 'NTamd64' } else { 'NTx86' }
+                Write-Log "This OS wants INF architecture: $WantArch"
+
+                $ArchMatched = @($Candidates | Where-Object {
+                    $ManufacturerLine = Select-String -Path $_.FullName -Pattern '^\s*%.*%\s*=' -ErrorAction SilentlyContinue |
+                                        Select-Object -First 1
+                    ($ManufacturerLine -ne $null) -and ($ManufacturerLine.Line -match [regex]::Escape($WantArch))
+                })
+
+                if ($ArchMatched.Count -ge 1) {
+                    $Candidates = $ArchMatched
+                    Write-Log "Architecture match narrowed candidates to $($Candidates.Count)."
+                } else {
+                    Write-Log "No INF declared $WantArch. Falling back to shallowest path." "WARNING"
+                }
+            }
+
+            # Final tie-break: shallowest path, then alphabetical, so the choice is
+            # deterministic rather than dependent on enumeration order.
+            $Chosen = $Candidates |
+                      Sort-Object @{Expression={$_.FullName.Split([char]'\').Count}}, FullName |
+                      Select-Object -First 1
+
+            $INFpath = $Chosen.FullName
+            Write-Log "INF File found here: $INFpath" "SUCCESS"
         }
 
         $FullINFPath = [System.IO.Path]::GetFullPath($INFPath)
@@ -708,15 +780,21 @@ If (-not $ThrowBad) {
         # Save current location and change to the driver directory
         $originalLocation = Get-Location
         Write-Log "Current directory: $originalLocation"
-        Write-Log "Changing to driver directory: $EXTRACTED_LocalDriverZipPath"
+        # CD to the folder the INF actually lives in - NOT the extract root.
+        # The INF's internal file references (CopyFiles, SourceDisksFiles) resolve
+        # relative to the working directory, so for a nested INF the extract root
+        # would be wrong. When the INF is at the root this is the same directory
+        # as before, so existing DriverZips are unaffected.
+        $INFDirectory = Split-Path $INFpath -Parent
+        Write-Log "Changing to driver directory: $INFDirectory"
 
-        Push-Location $EXTRACTED_LocalDriverZipPath
+        Push-Location $INFDirectory
 
         try {
             Write-Log "Working directory for pnputil: $(Get-Location)"
-            Write-Log "Executing: $pnputilPath /add-driver `"$INFFile`" "
-            
-            $result = & $pnputilPath /add-driver "$INFFile" 2>&1
+            Write-Log "Executing: $pnputilPath /add-driver `"$INFLeafName`" "
+
+            $result = & $pnputilPath /add-driver "$INFLeafName" 2>&1
             $exitCode = $LASTEXITCODE
             
             # Log all output
