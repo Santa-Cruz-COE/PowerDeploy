@@ -782,10 +782,10 @@ function Printer--InTune-Setup{
 
     if ($Global:DeployMode -eq "Production"){
 
-            $PotentialPrinterInTuneName = "$PRn : $PrinterName"
+            $PotentialPrinterInTuneName = "$PRn"+": $PrinterName"
 
     } else {
-            $PotentialPrinterInTuneName = "$PRn : $PrinterName [$Global:DeployMode]"
+            $PotentialPrinterInTuneName = "$PRn"+": $PrinterName [$Global:DeployMode]"
     }
         
     Clear
@@ -816,26 +816,22 @@ function Printer--InTune-Setup{
     Write-Log ""   
     Pause
     Write-Log ""  
-    Write-Log " 3 - APP INFORMATION:"
-    write-log "     - Name: follow your org naming conventions."
-    Write-Log "         - What I recommend: ""$PotentialPrinterInTuneName"""
-    Write-Log "     - Description: I recommend including printer name, IP, driver version, location, etc following a common convention for you organization. Example:"
-
-    write-host "
-Department: $DEPARTMENT `n
-Asset: $Asset `n
-Location: $Location `n
-`n
----`n
-`n
-PowerDeploy details:
-$RepoUrl`n
-$Global:RepoBranch`n
-Version: `n
-Verified: `n"
+    Write-Log " 3 - APP INFORMATION (example):"
+    write-log "     - NAME:"
+Write-Host "`n$PotentialPrinterInTuneName`n"
+    Write-Log "     - DESCRIPTION:"
+write-host "
+Department: $DEPARTMENT `n"
+if($Asset) {Write-Host "Asset: $Asset `n"}
+if ($Location) {Write-Host "Location: $Location `n"}
+Write-host "---`n
+PowerDeploy target repo: $RepoUrl`n
+Target Branch: $Global:RepoBranch`n
+Commit used: $gitCommit`n
+Verified: (Enter test date and test commit ver)`n"
 
     Write-Log "     - Publisher: Your organization name"
-    Write-Log "     - Version: (commit version)"
+    Write-Log "     - Version: $gitCommit"
     Write-Log "     - Category: Printers (Create this category if you do not already have, it will take some time to show up: https://learn.microsoft.com/en-us/intune/intune-service/apps/apps-add#create-and-edit-categories-for-apps)"
     Write-Log "     - Logo: Optional - You could create something with Canva using your organization logo, but standardize it"
     Write-Log ""   
@@ -3263,20 +3259,20 @@ Function Select-PrinterFromJSON {
 
             if ($DialogueSelection -eq "B"){
 
-                Write-Log "Enter the # of an printer from the above list to add to InTune." "WARNING"
+                Write-Log "Enter the # of a printer from the above list to add to InTune." "WARNING"
                 Write-Log " - NOTE: If you DO NOT SEE the printer you want, type 'exit' and you can add your own." "WARNING"
             
             } elseif ($DialogueSelection -eq "A"){
 
-                Write-Log "Enter the # of an printer from the list above for installation." "WARNING"
+                Write-Log "Enter the # of a printer from the list above for installation." "WARNING"
 
             } elseif ($DialogueSelection -eq "C"){
 
-                Write-Log "Enter the # of an printer from the list above for uninstallation." "WARNING"
+                Write-Log "Enter the # of a printer from the list above for uninstallation." "WARNING"
 
             } else {
 
-                Write-Log "Enter the # of an Printer from the list above." "WARNING"
+                Write-Log "Enter the # of a Printer from the list above." "WARNING"
 
             }
             
