@@ -105,6 +105,11 @@
     "WinGetID": "Logitech.OptionsPlus"
   },
   {
+    "ApplicationName": "Spotify",
+    "InstallMethod": "WinGet",
+    "WinGetID": "Spotify.Spotify"
+  },
+  {
     "ApplicationName": "MSI-Private-AzureBlob_Example",
     "InstallMethod": "MSI-Private-AzureBlob",
     "MSIPathFromContainerRoot": "zz/zz/install.msi",
