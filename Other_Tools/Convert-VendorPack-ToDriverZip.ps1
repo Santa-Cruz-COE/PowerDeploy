@@ -94,6 +94,56 @@ function Find-SevenZip {
     return $null
 }
 
+function Get-VendorFolder {
+    <#
+      Maps a driver name to the manufacturer folder in the blob layout:
+          printers/Drivers/<VendorFolder>/<file>.zip
+      Returns "Other" when no manufacturer can be identified from the name
+      (e.g. "DTC1250e Card Printer", "Generic / Text Only").
+
+      Deliberately an ORDERED ARRAY, not a hashtable: PowerShell does not
+      guarantee hashtable key order, and the more specific patterns have to be
+      tested before the shorter ones.
+
+      Keep this list in sync with Export-PrinterServer-Drivers.ps1 and
+      Convert-PrinterCSV-ToJSON.ps1 - these scripts are intentionally standalone
+      (Script A has to run on the print server on its own), so the helper is
+      duplicated rather than shared.
+    #>
+    param([string]$DriverName)
+
+    if ([string]::IsNullOrWhiteSpace($DriverName)) { return 'Other' }
+
+    $map = @(
+        @{ Pattern = 'KONICA\s*MINOLTA';     Folder = 'KonicaMinolta' }
+        @{ Pattern = 'Hewlett[-\s]?Packard'; Folder = 'HP' }
+        @{ Pattern = '\bHP\b';               Folder = 'HP' }
+        @{ Pattern = '\bCanon\b';            Folder = 'Canon' }
+        @{ Pattern = '\bXerox\b';            Folder = 'Xerox' }
+        @{ Pattern = '\bRicoh\b';            Folder = 'Ricoh' }
+        @{ Pattern = '\bBrother\b';          Folder = 'Brother' }
+        @{ Pattern = '\bLexmark\b';          Folder = 'Lexmark' }
+        @{ Pattern = '\bEpson\b';            Folder = 'Epson' }
+        @{ Pattern = '\bKyocera\b';          Folder = 'Kyocera' }
+        @{ Pattern = '\bSharp\b';            Folder = 'Sharp' }
+        @{ Pattern = '\bToshiba\b';          Folder = 'Toshiba' }
+        @{ Pattern = '\bOKI\b';              Folder = 'OKI' }
+        @{ Pattern = '\bZebra\b';            Folder = 'Zebra' }
+        @{ Pattern = '\bDymo\b';             Folder = 'Dymo' }
+        @{ Pattern = '\bEvolis\b';           Folder = 'Evolis' }
+        @{ Pattern = '\bFargo\b';            Folder = 'Fargo' }
+        @{ Pattern = '\bSamsung\b';          Folder = 'Samsung' }
+        @{ Pattern = '\bDell\b';             Folder = 'Dell' }
+        @{ Pattern = '\bAdobe\b';            Folder = 'Adobe' }
+        @{ Pattern = '\bMicrosoft\b';        Folder = 'Microsoft' }
+    )
+
+    foreach ($e in $map) {
+        if ($DriverName -imatch $e.Pattern) { return $e.Folder }
+    }
+    return 'Other'
+}
+
 function Get-INFDriverInfo {
     <#
       Parses one INF the way Windows does:
@@ -371,8 +421,34 @@ Try {
         $PresetDriver = (($FinalDriverName -replace '[^A-Za-z0-9]+', '_').Trim('_').ToUpper()) + "_WIN_X64"
     }
 
-    $BlobPath = "$($BlobPathPrefix.TrimEnd('/'))/$ZipName"
+    # Group by manufacturer so the blob layout stays navigable:
+    #   printers/Drivers/KonicaMinolta/<zip>   not   printers/Drivers/<zip>
+    $VendorFolder = Get-VendorFolder -DriverName $FinalDriverName
+    $BlobPath = "$($BlobPathPrefix.TrimEnd('/'))/$VendorFolder/$ZipName"
 
+    # TODO: auto-fill KnownModels when the INF actually declares real model names.
+    #
+    # Whether this is possible depends entirely on the driver type:
+    #
+    #  - MODEL-SPECIFIC INFs DO carry readable model names, as the left-hand side
+    #    of their model entries. We already parse these into $Chosen.DriverNames,
+    #    e.g. the HP UPD pack yields real strings like
+    #        "HP LaserJet Enterprise 500 color M551 (DOT4USB)"
+    #    For this class, KnownModels could be populated for free from that list.
+    #
+    #  - UNIVERSAL drivers DO NOT contain them, anywhere in the package. Verified
+    #    against the KONICA MINOLTA Universal PCL pack: its only model hints are
+    #    truncated USB hardware IDs of the form
+    #        USBPRINT\KONICA_MINOLTAbizhub7925
+    #    where the trailing 4 chars are a hash, not a model number - the model
+    #    portion is truncated away. The real supported-model list lives in the
+    #    vendor's compatibility matrix / release notes, NOT in the driver package.
+    #    No amount of INF parsing recovers it.
+    #
+    # So this can only ever be partial, which is why it is left as a placeholder
+    # for now - populating it for some entries and not others was judged more
+    # confusing than leaving it consistently manual. Revisit if the inconsistency
+    # turns out to be acceptable.
     $Entry = [PSCustomObject][ordered]@{
         PresetDriver = $PresetDriver
         DriverName   = $FinalDriverName

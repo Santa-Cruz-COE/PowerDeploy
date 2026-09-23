@@ -87,6 +87,51 @@ function Get-PresetDriverCode {
     return "$slug`_WIN_X64"
 }
 
+function Get-VendorFolder {
+    <#
+      Maps a driver name to the manufacturer folder in the blob layout:
+          printers/Drivers/<VendorFolder>/<file>.zip
+      Returns "Other" when no manufacturer can be identified from the name
+      (e.g. "DTC1250e Card Printer", "Generic / Text Only").
+
+      Deliberately an ORDERED ARRAY, not a hashtable: PowerShell does not
+      guarantee hashtable key order, and the more specific patterns have to be
+      tested before the shorter ones.
+    #>
+    param([string]$DriverName)
+
+    if ([string]::IsNullOrWhiteSpace($DriverName)) { return 'Other' }
+
+    $map = @(
+        @{ Pattern = 'KONICA\s*MINOLTA';     Folder = 'KonicaMinolta' }
+        @{ Pattern = 'Hewlett[-\s]?Packard'; Folder = 'HP' }
+        @{ Pattern = '\bHP\b';               Folder = 'HP' }
+        @{ Pattern = '\bCanon\b';            Folder = 'Canon' }
+        @{ Pattern = '\bXerox\b';            Folder = 'Xerox' }
+        @{ Pattern = '\bRicoh\b';            Folder = 'Ricoh' }
+        @{ Pattern = '\bBrother\b';          Folder = 'Brother' }
+        @{ Pattern = '\bLexmark\b';          Folder = 'Lexmark' }
+        @{ Pattern = '\bEpson\b';            Folder = 'Epson' }
+        @{ Pattern = '\bKyocera\b';          Folder = 'Kyocera' }
+        @{ Pattern = '\bSharp\b';            Folder = 'Sharp' }
+        @{ Pattern = '\bToshiba\b';          Folder = 'Toshiba' }
+        @{ Pattern = '\bOKI\b';              Folder = 'OKI' }
+        @{ Pattern = '\bZebra\b';            Folder = 'Zebra' }
+        @{ Pattern = '\bDymo\b';             Folder = 'Dymo' }
+        @{ Pattern = '\bEvolis\b';           Folder = 'Evolis' }
+        @{ Pattern = '\bFargo\b';            Folder = 'Fargo' }
+        @{ Pattern = '\bSamsung\b';          Folder = 'Samsung' }
+        @{ Pattern = '\bDell\b';             Folder = 'Dell' }
+        @{ Pattern = '\bAdobe\b';            Folder = 'Adobe' }
+        @{ Pattern = '\bMicrosoft\b';        Folder = 'Microsoft' }
+    )
+
+    foreach ($e in $map) {
+        if ($DriverName -imatch $e.Pattern) { return $e.Folder }
+    }
+    return 'Other'
+}
+
 function Test-IsAdmin {
     try {
         $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -223,11 +268,34 @@ Try {
         $ZipMB = [math]::Round((Get-Item $ZipPath).Length / 1MB, 2)
         Write-Host ("   -> {0} ({1} MB)" -f $ZipName, $ZipMB) -ForegroundColor Green
 
+        # TODO: record which printers were OBSERVED using this driver.
+        #
+        # Running here on the print server, we can see exactly which queues are
+        # bound to each driver - Get-Printer returns DriverName per printer, so
+        # grouping by it costs nothing and needs no network calls. That is real
+        # evidence from this environment, and arguably more useful than a
+        # vendor's theoretical list of every model a universal driver supports.
+        #
+        # Two caveats to settle before building it:
+        #
+        #  1. This yields QUEUE NAMES, not models. Nothing on the port exposes a
+        #     model - Description is just "Standard TCP/IP Port" and SNMPEnabled
+        #     is commonly False. True model strings require an SNMP query to the
+        #     device (OID 1.3.6.1.2.1.25.3.2.1.3.1 - which is what HP's own UPD
+        #     does; see hpcu3456SPS.xml inside their pack). That is separate work.
+        #     Queue names only help if your naming convention embeds the model.
+        #
+        #  2. It should go in its OWN field (e.g. ObservedOn), not KnownModels.
+        #     KnownModels is hand-curated truth; writing machine output into it
+        #     means a re-run silently clobbers notes someone wrote by hand.
+        #
+        # Deferred deliberately - not blocking, and the field is documentation
+        # only (the installer never reads KnownModels).
         [void]$Entries.Add([PSCustomObject][ordered]@{
             PresetDriver = Get-PresetDriverCode -Name $r.DriverName
             DriverName   = $r.DriverName
             INFFile      = $r.INFFile
-            DriverZip    = "$($BlobPathPrefix.TrimEnd('/'))/$ZipName"
+            DriverZip    = "$($BlobPathPrefix.TrimEnd('/'))/$(Get-VendorFolder -DriverName $r.DriverName)/$ZipName"
             KnownModels  = "FILL_IN_MODELS_THIS_COVERS"
         })
     }
@@ -246,7 +314,10 @@ Try {
     Write-Host ("  JSON entries     : {0}" -f $JsonPath)
     Write-Host ""
     Write-Host "NEXT STEPS:" -ForegroundColor Yellow
-    Write-Host "  1. Upload each zip to your blob under: $BlobPathPrefix/"
+    Write-Host "  1. Upload each zip to the exact path in its DriverZip field."
+    Write-Host "     These are grouped by manufacturer, e.g:"
+    foreach ($e in ($Entries | Select-Object -First 3)) { Write-Host ("       {0}" -f $e.DriverZip) }
+    Write-Host "     Anything whose manufacturer could not be identified goes under /Other."
     Write-Host "  2. Merge the 'drivers' array into your printer JSON."
     Write-Host "  3. Fill in KnownModels for each entry."
     Write-Host "  4. The PresetDriver codes here match Export-PrinterServer-CSV.ps1,"
