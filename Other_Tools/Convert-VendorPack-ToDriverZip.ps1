@@ -1,4 +1,5 @@
 <#
+NOTE: This script was primarily written by Claude Opus 5.0 + 5.5. It was tested and manually adjusted before publication.
 
 INSTRUCTIONS:
 Ingests a manufacturer's printer driver pack and turns it into a PowerDeploy-ready
@@ -24,14 +25,16 @@ Instead this script reads the INFs themselves, which is authoritative:
      1 of 12 INFs declares driver names; the other 11 are bus/port/scan/fax
      components. This single test does most of the work.
 
-  2. SECONDARY FILTER - architecture, read from the [Manufacturer] decoration
-     ("NTamd64" vs "NTx86"). This is a Microsoft INF requirement, not a vendor
-     convention, so it is the same for every manufacturer. INF files are
-     case-insensitive by spec, so matching is case-insensitive
+  2. ARCHITECTURE - read from the [Manufacturer] decoration ("NTamd64",
+     "NTarm64", "NTx86") and shown next to each INF. It is reported, not
+     filtered: x64, ARM64 and x86 are all valid targets, so the choice is yours.
+     The decoration is a Microsoft INF requirement, not a vendor convention.
+     INF files are case-insensitive by spec, so matching is case-insensitive
      (HP writes "NTAMD64", KM writes "NTamd64", others write "ntamd64.6.0.3").
 
   3. TIE-BREAK - if a DriverName is supplied, keep only INFs declaring it.
-     Anything still ambiguous is put to you as a pick-list; nothing is guessed.
+     Anything still ambiguous is put to you as a pick-list, in the order the
+     INFs were found; nothing is guessed.
 
 PACKAGING RULE
 The zip is made from the directory the chosen INF lives in. Verified against
@@ -74,12 +77,52 @@ $RepoRoot = Split-Path $ScriptDir -Parent
 $WorkingDirectory = Split-Path $RepoRoot -Parent
 if (!(Test-Path "$WorkingDirectory\TEMP")) { $WorkingDirectory = $ScriptDir }
 
+$ThisFileName = $MyInvocation.MyCommand.Name
+$LogRoot = "$WorkingDirectory\Logs\Other_Logs"
+$LogPath = "$LogRoot\$ThisFileName._Log_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = "$WorkingDirectory\TEMP\DriverPacks"
 }
 
 
 # --- Helpers --------------------------------------------------------------
+
+function Write-Log {
+    param(
+        [string]$Message,
+        [string]$Level = "INFO"
+    )
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logEntry = "[$timestamp] [$Level] $Message"
+
+    switch ($Level) {
+        "ERROR"   { Write-Host $logEntry -ForegroundColor Red }
+        "WARNING" { Write-Host $logEntry -ForegroundColor Yellow }
+        "SUCCESS" { Write-Host $logEntry -ForegroundColor Green }
+        "DRYRUN"  { Write-Host $logEntry -ForegroundColor Cyan }
+        default   { Write-Host $logEntry }
+    }
+
+    # Ensure log directory exists
+    $logDir = Split-Path $LogPath -Parent
+    if (!(Test-Path $logDir)) {
+        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    }
+
+    # Resilient log write: retry an atomic append so a transient AV/EDR file lock
+    # (Defender, CrowdStrike, etc.) cannot throw "Stream was not readable" and spam the
+    # console. Encoding::Default (system ANSI) matches the prior Add-Content behavior.
+    for ($logAttempt = 1; $logAttempt -le 5; $logAttempt++) {
+        try {
+            [System.IO.File]::AppendAllText($LogPath, $logEntry + [Environment]::NewLine, [System.Text.Encoding]::Default)
+            break
+        } catch {
+            if ($logAttempt -eq 5) { break }   # give up quietly after ~160ms of retries
+            Start-Sleep -Milliseconds 40
+        }
+    }
+}
 
 function Find-SevenZip {
     # Needed only for self-extracting .exe packs.
@@ -150,6 +193,7 @@ function Get-INFDriverInfo {
         [Manufacturer] lists  %Var%=SectionBase,decoration1,decoration2...
         Model sections are    [SectionBase] and [SectionBase.decoration]
         Model entries look like   "Driver Name" = InstallSection,HardwareID
+                             or   %Token% = InstallSection,HardwareID  (resolved via [Strings])
       Returns the declared driver names plus the architectures declared.
     #>
     param([string]$Path)
@@ -159,6 +203,7 @@ function Get-INFDriverInfo {
         DriverNames   = @()
         Decorations   = @()
         SupportsAmd64 = $false
+        SupportsArm64 = $false
         Supportsx86   = $false
     }
 
@@ -199,8 +244,20 @@ function Get-INFDriverInfo {
                 [void]$ModelSectionNames.Add("$Base.$dec")
                 # Decorations are the authoritative architecture marker.
                 if ($dec -imatch 'amd64') { $Result.SupportsAmd64 = $true }
+                if ($dec -imatch 'arm64') { $Result.SupportsArm64 = $true }
                 if ($dec -imatch 'x86')   { $Result.Supportsx86   = $true }
             }
+        }
+    }
+
+    # [Strings] - model entries may name the driver via a %Token% instead of a
+    # literal (HP device packs write  %PRINTER1% = INSTALL_SECTION,...). Only the
+    # base section is read; localized [Strings.xxxx] copies would override it.
+    $Strings = @{}
+    $StrKey = $Sections.Keys | Where-Object { $_ -ieq 'Strings' } | Select-Object -First 1
+    if ($StrKey) {
+        foreach ($s in $Sections[$StrKey]) {
+            if ($s -match '^\s*([^=]+?)\s*=\s*"?(.*?)"?\s*$') { $Strings[$Matches[1]] = $Matches[2] }
         }
     }
 
@@ -210,11 +267,14 @@ function Get-INFDriverInfo {
         $key = $Sections.Keys | Where-Object { $_ -ieq $sName } | Select-Object -First 1
         if (-not $key) { continue }
         foreach ($entry in $Sections[$key]) {
-            # Model entries always quote the driver name on the left of '='.
+            # The driver name on the left of '=' is either quoted or a %Token%.
+            $n = $null
             if ($entry -match '^\s*"([^"]+)"\s*=') {
                 $n = $Matches[1].Trim()
-                if ($n -ne '' -and -not $Names.Contains($n)) { [void]$Names.Add($n) }
+            } elseif ($entry -match '^\s*%([^%]+)%\s*=' -and $Strings.ContainsKey($Matches[1].Trim())) {
+                $n = $Strings[$Matches[1].Trim()].Trim()
             }
+            if ($n -and -not $Names.Contains($n)) { [void]$Names.Add($n) }
         }
     }
 
@@ -224,12 +284,37 @@ function Get-INFDriverInfo {
     return $Result
 }
 
+function Get-INFArchList {
+    # Architectures an INF declares, as short labels: x64, arm64, x86.
+    param($Info)
+    $arch = @()
+    if ($Info.SupportsAmd64) { $arch += 'x64' }
+    if ($Info.SupportsArm64) { $arch += 'arm64' }
+    if ($Info.Supportsx86)   { $arch += 'x86' }
+    return ,$arch
+}
+
+function Read-ChoiceIndex {
+    # Prompts until a valid index 0..(Count-1) is entered. No default: blank or
+    # out-of-range input is rejected and asked again.
+    param([int]$Count)
+    while ($true) {
+        $raw = Read-Host "Enter number (0-$($Count - 1))"
+        if ($null -eq $raw) { throw "No input available for selection." }   # stdin closed
+        $n = 0
+        if ([int]::TryParse($raw.Trim(), [ref]$n) -and $n -ge 0 -and $n -lt $Count) { return $n }
+        Write-Log "Invalid choice '$raw'. Enter a number from 0 to $($Count - 1)." "WARNING"
+    }
+}
+
 
 # --- Main -----------------------------------------------------------------
 
 Try {
 
-    if (!(Test-Path $PackPath)) { Write-Warning "Pack not found: $PackPath"; return }
+    Write-Log "Log file: $LogPath"
+
+    if (!(Test-Path $PackPath)) { Write-Log "Pack not found: $PackPath" "ERROR"; return }
 
     $PackItem = Get-Item -LiteralPath $PackPath
     $PackLabel = [System.IO.Path]::GetFileNameWithoutExtension($PackItem.Name)
@@ -239,13 +324,13 @@ Try {
     if ($PackItem.PSIsContainer) {
 
         $ExtractRoot = $PackItem.FullName
-        Write-Host "Using already-extracted folder: $ExtractRoot"
+        Write-Log "Using already-extracted folder: $ExtractRoot"
 
     } else {
 
         $ExtractRoot = Join-Path $OutputDirectory "$PackLabel-EXTRACTED"
         if (Test-Path $ExtractRoot) {
-            Write-Host "Removing previous extraction: $ExtractRoot"
+            Write-Log "Removing previous extraction: $ExtractRoot"
             Remove-Item -LiteralPath $ExtractRoot -Recurse -Force
         }
         New-Item -ItemType Directory -Path $ExtractRoot -Force | Out-Null
@@ -253,24 +338,24 @@ Try {
         switch ($PackItem.Extension.ToLower()) {
 
             '.zip' {
-                Write-Host "Extracting zip..."
+                Write-Log "Extracting zip..."
                 Expand-Archive -LiteralPath $PackItem.FullName -DestinationPath $ExtractRoot -Force -ErrorAction Stop
             }
 
             '.exe' {
                 $SevenZip = Find-SevenZip
                 if (-not $SevenZip) {
-                    Write-Warning "This pack is a self-extracting .exe, which needs 7-Zip to unpack."
-                    Write-Warning "Install 7-Zip, or extract the .exe yourself and re-run against the folder."
+                    Write-Log "This pack is a self-extracting .exe, which needs 7-Zip to unpack." "ERROR"
+                    Write-Log "Install 7-Zip, or extract the .exe yourself and re-run against the folder." "ERROR"
                     return
                 }
-                Write-Host "Extracting self-extracting exe with 7-Zip..."
+                Write-Log "Extracting self-extracting exe with 7-Zip..."
                 & $SevenZip x $PackItem.FullName "-o$ExtractRoot" -y | Out-Null
-                if ($LASTEXITCODE -ne 0) { Write-Warning "7-Zip failed with exit code $LASTEXITCODE"; return }
+                if ($LASTEXITCODE -ne 0) { Write-Log "7-Zip failed with exit code $LASTEXITCODE" "ERROR"; return }
             }
 
             default {
-                Write-Warning "Unsupported pack type '$($PackItem.Extension)'. Expected .zip, .exe, or a folder."
+                Write-Log "Unsupported pack type '$($PackItem.Extension)'. Expected .zip, .exe, or a folder." "ERROR"
                 return
             }
         }
@@ -278,36 +363,34 @@ Try {
 
     # --- 2. Find and parse every INF --------------------------------------
     $AllINFs = @(Get-ChildItem -Path $ExtractRoot -Filter *.inf -Recurse -File -ErrorAction SilentlyContinue)
-    if ($AllINFs.Count -eq 0) { Write-Warning "No .inf files found anywhere in $ExtractRoot"; return }
+    if ($AllINFs.Count -eq 0) { Write-Log "No .inf files found anywhere in $ExtractRoot" "ERROR"; return }
 
-    Write-Host ""
-    Write-Host "Found $($AllINFs.Count) INF file(s). Parsing..."
+    Write-Log "Found $($AllINFs.Count) INF file(s). Parsing..."
     $Parsed = foreach ($inf in $AllINFs) { Get-INFDriverInfo -Path $inf.FullName }
 
     # PRIMARY FILTER: only INFs that actually declare printer driver names.
     $PrinterINFs = @($Parsed | Where-Object { $_.DriverNames.Count -gt 0 })
-
-    Write-Host ""
-    Write-Host "=== PACK ANALYSIS ===" -ForegroundColor Cyan
-    Write-Host ("  INFs total                   : {0}" -f $AllINFs.Count)
-    Write-Host ("  INFs declaring printer drivers: {0}" -f $PrinterINFs.Count)
+    Write-Log ""
+    Write-Log "=== PACK ANALYSIS ==="
+    Write-Log ""
+    Write-Log ("  INFs total                   : {0}" -f $AllINFs.Count)
+    Write-Log ("  INFs declaring printer drivers: {0}" -f $PrinterINFs.Count)
+    Write-Log ""
     foreach ($p in $PrinterINFs) {
+
         $rel = $p.Path.Substring($ExtractRoot.Length).TrimStart('\')
-        $arch = @(); if ($p.SupportsAmd64) { $arch += 'x64' }; if ($p.Supportsx86) { $arch += 'x86' }
-        Write-Host ""
-        Write-Host ("  {0}  [{1}]" -f $rel, ($arch -join '/')) -ForegroundColor Yellow
-        foreach ($n in $p.DriverNames) { Write-Host "      - $n" }
+        Write-Log ("  {0}  [{1}]" -f $rel, ((Get-INFArchList $p) -join '/'))
+        foreach ($n in $p.DriverNames) { Write-Log "      - $n" }
+        Write-Log ""
     }
 
-    if ($PrinterINFs.Count -eq 0) { Write-Warning "No INF in this pack declares any printer driver. Nothing to package."; return }
-    if ($Analyze) { Write-Host ""; Write-Host "-Analyze specified; stopping here."; return }
+    if ($PrinterINFs.Count -eq 0) { Write-Log "No INF in this pack declares any printer driver. Nothing to package." "ERROR"; return }
+    if ($Analyze) { Write-Log "-Analyze specified; stopping here."; return }
 
     # --- 3. Narrow to one INF ---------------------------------------------
+    # Architecture is deliberately NOT filtered: x64, ARM64 and x86 are all valid
+    # targets, and it is shown next to each INF in the analysis above.
     $Candidates = $PrinterINFs
-
-    # SECONDARY FILTER: architecture.
-    $Wanted = @($Candidates | Where-Object { $_.SupportsAmd64 })
-    if ($Wanted.Count -ge 1) { $Candidates = $Wanted } else { Write-Host "No x64-capable INF found; keeping all candidates." -ForegroundColor Yellow }
 
     # TIE-BREAK: explicit driver name. This is the filter that actually does the
     # disambiguating - in a fresh HP UPD pack 5 of 12 INFs declare driver names,
@@ -327,60 +410,37 @@ Try {
                 @($n | Where-Object { $_ -like "*$DriverName*" -or $DriverName -like "*$_*" }).Count -gt 0
             })
             if ($ByName.Count -ge 1) {
-                Write-Host ""
-                Write-Warning "No EXACT match for '$DriverName'. Found partial match(es) instead."
-                Write-Warning "Confirm the exact name below - it must match Add-PrinterDriver exactly."
+                Write-Log "No EXACT match for '$DriverName'. Found partial match(es) instead." "WARNING"
+                Write-Log "Confirm the exact name below - it must match Add-PrinterDriver exactly." "WARNING"
             }
         }
 
         if ($ByName.Count -ge 1) {
             $Candidates = $ByName
         } else {
-            Write-Warning "No INF declares a driver matching '$DriverName'."
-            Write-Warning "Names that ARE available are listed above - copy one of them exactly."
+            Write-Log "No INF declares a driver matching '$DriverName'." "ERROR"
+            Write-Log "Names that ARE available are listed above - copy one of them exactly." "ERROR"
             return
         }
 
     } else {
-        Write-Host ""
-        Write-Warning "No -DriverName supplied. Selection will be interactive."
-        Write-Warning "Tip: the DriverName column from Export-PrinterServer-CSV.ps1 is exactly what goes here."
+        Write-Log "No -DriverName supplied. Selection will be interactive." "WARNING"
     }
 
-    # Prefer a SELF-CONTAINED folder. Because the zip is built from the INF's
-    # directory, an INF sitting in a folder that also nests OTHER driver variants
-    # would drag all of them in. Real example: a KM pack with a flattened copy at
-    # the root produced a 91 MB zip (the root also holds the whole Driver\ tree),
-    # versus ~31 MB when packaging the arch-specific Win_x64 folder instead.
-    # So rank candidates whose folder contains no other printer INF first.
-    if ($Candidates.Count -gt 1) {
-        $Ranked = $Candidates | ForEach-Object {
-            $cand = $_          # capture: $_ rebinds inside the nested Where-Object
-            $dir = (Split-Path $cand.Path -Parent).TrimEnd('\') + '\'
-            $nested = @($PrinterINFs | Where-Object {
-                $_.Path -ne $cand.Path -and $_.Path.StartsWith($dir, [StringComparison]::OrdinalIgnoreCase)
-            }).Count
-            [PSCustomObject]@{ Info = $cand; Nested = $nested; Depth = $cand.Path.Split([char]'\').Count }
-        }
-        # Fewest nested variants first, then shallowest, for a deterministic order.
-        $Candidates = @($Ranked | Sort-Object Nested, Depth | ForEach-Object { $_.Info })
+    Write-Log ""
 
-        $SelfContained = @($Ranked | Where-Object { $_.Nested -eq 0 })
-        if ($SelfContained.Count -ge 1 -and $SelfContained.Count -lt $Ranked.Count) {
-            Write-Host ""
-            Write-Host "Note: preferring self-contained driver folder(s) to avoid over-packaging." -ForegroundColor Yellow
-        }
-    }
-
+    # No ranking: the analysis above lists each INF's driver names, so the pick
+    # is left to you, in the same order the INFs were found. Note the zip is
+    # built from the chosen INF's folder, so where a pack ships the same INF in
+    # several places (e.g. a flattened root copy AND Driver\...\Win_x64\), the
+    # arch-specific folder makes a much smaller zip.
     if ($Candidates.Count -gt 1) {
-        Write-Host ""
-        Write-Host "Multiple INFs still match. Choose one (best first):" -ForegroundColor Yellow
+        Write-Log "Multiple INFs match. Choose one:"
+        Write-Log ""
         for ($i = 0; $i -lt $Candidates.Count; $i++) {
-            Write-Host ("  [{0}] {1}" -f $i, $Candidates[$i].Path.Substring($ExtractRoot.Length).TrimStart('\'))
+            Write-Log ("  [{0}] {1}  [{2}]" -f $i, $Candidates[$i].Path.Substring($ExtractRoot.Length).TrimStart('\'), ((Get-INFArchList $Candidates[$i]) -join '/'))
         }
-        $pick = Read-Host "Enter number (blank = 0)"
-        if ([string]::IsNullOrWhiteSpace($pick)) { $pick = 0 }
-        $Chosen = $Candidates[[int]$pick]
+        $Chosen = $Candidates[(Read-ChoiceIndex -Count $Candidates.Count)]
     } else {
         $Chosen = $Candidates[0]
     }
@@ -391,12 +451,10 @@ Try {
         if ($Chosen.DriverNames.Count -eq 1) {
             $FinalDriverName = $Chosen.DriverNames[0]
         } else {
-            Write-Host ""
-            Write-Host "This INF declares several driver names. Which one do your printers use?" -ForegroundColor Yellow
-            for ($i = 0; $i -lt $Chosen.DriverNames.Count; $i++) { Write-Host ("  [{0}] {1}" -f $i, $Chosen.DriverNames[$i]) }
-            $pick = Read-Host "Enter number (blank = 0)"
-            if ([string]::IsNullOrWhiteSpace($pick)) { $pick = 0 }
-            $FinalDriverName = $Chosen.DriverNames[[int]$pick]
+            Write-Log "This INF declares several driver names. Which one do your printers use?"
+            Write-Log ""
+            for ($i = 0; $i -lt $Chosen.DriverNames.Count; $i++) { Write-Log ("  [{0}] {1}" -f $i, $Chosen.DriverNames[$i]) }
+            $FinalDriverName = $Chosen.DriverNames[(Read-ChoiceIndex -Count $Chosen.DriverNames.Count)]
         }
     }
 
@@ -406,19 +464,20 @@ Try {
     # --- 4. Build the zip from the INF's own folder ------------------------
     # Validated on HP ("64bit\") and KM ("Driver\PCL\Driver\Win_x64\"): the folder
     # holding the INF also holds all of its payload files.
-    $ZipName = "$PackLabel-x64.zip"
+    # Name the zip after the architecture(s) the chosen INF declares.
+    $ArchLabel = (Get-INFArchList $Chosen) -join '-'
+    $ZipName = "$PackLabel-$ArchLabel.zip"
     $ZipPath = Join-Path $OutputDirectory $ZipName
     if (Test-Path $ZipPath) { Remove-Item -LiteralPath $ZipPath -Force }
 
-    Write-Host ""
-    Write-Host "Packaging driver folder: $DriverFolder"
+    Write-Log "Packaging driver folder: $DriverFolder"
     Compress-Archive -Path (Join-Path $DriverFolder '*') -DestinationPath $ZipPath -Force -ErrorAction Stop
 
     $ZipSizeMB = [math]::Round((Get-Item $ZipPath).Length / 1MB, 2)
 
     # --- 5. Emit the JSON drivers[] entry ---------------------------------
     if ([string]::IsNullOrWhiteSpace($PresetDriver)) {
-        $PresetDriver = (($FinalDriverName -replace '[^A-Za-z0-9]+', '_').Trim('_').ToUpper()) + "_WIN_X64"
+        $PresetDriver = (($FinalDriverName -replace '[^A-Za-z0-9]+', '_').Trim('_').ToUpper()) + "_WIN_" + ($ArchLabel -replace '-', '_').ToUpper()
     }
 
     # Group by manufacturer so the blob layout stays navigable:
@@ -461,22 +520,26 @@ Try {
     $Entry | ConvertTo-Json -Depth 4 | Out-File -FilePath $JsonPath -Encoding UTF8 -Force
 
     # --- 6. Report ---------------------------------------------------------
-    Write-Host ""
-    Write-Host "=== DONE ===" -ForegroundColor Green
-    Write-Host ("  Chosen INF   : {0}" -f $ChosenINF.Name)
-    Write-Host ("  Driver name  : {0}" -f $FinalDriverName)
-    Write-Host ("  Zip          : {0}  ({1} MB)" -f $ZipPath, $ZipSizeMB)
-    Write-Host ("  JSON entry   : {0}" -f $JsonPath)
-    Write-Host ""
-    Write-Host "NEXT STEPS:" -ForegroundColor Yellow
-    Write-Host "  1. Upload the zip to your blob so it lands at: $BlobPath"
-    Write-Host "  2. Paste the JSON entry into the 'drivers' array of your printer JSON."
-    Write-Host "  3. Fill in KnownModels."
-    Write-Host ""
+    Write-Log ""
+    Write-Log "=== DONE ===" "SUCCESS"
+    Write-Log ""
+    Write-Log ("  Chosen INF   : {0}" -f $ChosenINF.Name)
+    Write-Log ("  Driver name  : {0}" -f $FinalDriverName)
+    Write-Log ("  Zip          : {0}  ({1} MB)" -f $ZipPath, $ZipSizeMB)
+    Write-Log ("  JSON entry   : {0}" -f $JsonPath)
+    Write-Log ""
+    Write-Log "NEXT STEPS:"
+    Write-Log ""
+    Write-Log "  1. Upload the zip to your blob so it lands at: $BlobPath"
+    Write-Log "  2. Paste the JSON entry into the 'drivers' array of your printer JSON."
+    Write-Log "  3. Fill in KnownModels."
+    Write-Log ""
+    Write-Log "JSON output:"
     Write-Host (Get-Content $JsonPath -Raw)
 
 } Catch {
-    Write-Warning "Failed: $_"
+    Write-Log "Failed: $_" "ERROR"
 }
 
-Write-Host "Finished"
+Write-Log ""
+Write-Log "Finished"

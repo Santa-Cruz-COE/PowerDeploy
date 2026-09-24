@@ -90,6 +90,8 @@ $AppDetect_ScriptPath = "$RepoRoot\Templates\Detection-Script-Application_TEMPLA
 $GitRunnerTemplate_ScriptPath = "$RepoRoot\Templates\Git-Runner_TEMPLATE.ps1"
 # Path to Adobe Uninstall Cleanup script
 $AdobeUninstallCleanup_ScriptPath = "$RepoRoot\Uninstallers\Adobe_Uninstaller_Suite\Uninstall-AllAdobeProducts-FullClean.ps1"
+# Path to Convert-VendorPack-ToDriverZip.ps1
+$ConvertVendorPackToDriverZip_ScriptPath = "$RepoRoot\Other_Tools\Convert-VendorPack-ToDriverZip.ps1"
 
 $PublicJSONpath = "$RepoRoot\Templates\ApplicationData_TEMPLATE.json"
 
@@ -413,6 +415,33 @@ Function Set-URL {
     Return $RepoUrl
 
     
+}
+
+Function Printer--Convert-Vendor-DriverPack {
+
+    Clear
+
+    Write-Log "==========================================================================================="
+    Write-Log "SCRIPT: $LocalFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START"
+    Write-Log "==========================================================================================="
+
+    Write-Log ""
+
+    Write-Log "Enter the path of your manufacturer driver pack. ZIP or EXE accepted."
+
+    $PackPath = Read-Host "PATH"
+
+    Write-Host ""
+    Try{
+
+        & $ConvertVendorPackToDriverZip_ScriptPath -PackPath $PackPath
+
+    } Catch {
+
+        Throw $_
+
+    }
+
 }
 
 # DONE (still need testing) 1/14/26
