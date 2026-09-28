@@ -854,9 +854,11 @@ Department: $DEPARTMENT `n"
 if($Asset) {Write-Host "Asset: $Asset `n"}
 if ($Location) {Write-Host "Location: $Location `n"}
 Write-host "---`n
-PowerDeploy target repo: $RepoUrl`n
+Target Repo: $RepoUrl`n
 Target Branch: $Global:RepoBranch`n
-Commit used: $gitCommit`n
+Source Repo: $GitURL
+Source Branch: $GitBranch
+Source Commit: $gitCommit`n
 Verified: (Enter test date and test commit ver)`n"
 
     Write-Log "     - Publisher: Your organization name"
@@ -869,8 +871,18 @@ Verified: (Enter test date and test commit ver)`n"
     Write-Log " 4 - PROGRAM:"
     Write-Log "     - Install command:" 
     Write-Log "         - Use the install command found inside this file: $MainInstallCommandTXT" # I don't remember why I named this "main"
+    Write-Host ""
+    Write-Host "Install Command:"
+    Write-Host ""
+    Get-Content -Path $MainInstallCommandTXT
+    Write-Host ""
     Write-Log "     - Uninstall command:" 
     Write-Log "         - Use the uninstall command found inside this file: $UninstallCommandTXT"
+    Write-Host ""
+    Write-Host "Uninstall Command:"
+    Write-Host ""
+    Get-Content -Path $UninstallCommandTXT
+    Write-Host ""
     Write-Log "     - Install time: 15 minutes"
     Write-Log "     - Allow available uninstall: Yes"
     Write-Log "     - Install behavior: System"
