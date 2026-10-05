@@ -814,7 +814,7 @@ function Printer--InTune-Setup{
             $PotentialPrinterInTuneName = "$PRn"+": $PrinterName"
 
     } else {
-            $PotentialPrinterInTuneName = "$PRn"+": $PrinterName [$Global:DeployMode]"
+            $PotentialPrinterInTuneName = "$PRn"+": $PrinterName [$Global:DeployMode] [VER: $gitCommit]"
     }
         
     Clear
@@ -825,6 +825,10 @@ function Printer--InTune-Setup{
     # Write-Log ""
     # Pause
     # Write-Log ""
+
+    # Set the publisher to PowerDeploy if it is missing
+    if($publisher -eq "" -or $null -eq $publisher){$publisher = "PowerDeploy"}
+
     Clear
     Write-Log "==========================================================================================="
     Write-Log "UPLOAD AND CREATE INTUNE WIN32 APPLICATION"
@@ -845,24 +849,33 @@ function Printer--InTune-Setup{
     Write-Log ""   
     Pause
     Write-Log ""  
-    Write-Log " 3 - APP INFORMATION (example):"
-    write-log "     - NAME:"
+    Write-Log " 3 - APP INFORMATION:"
+    write-log "     - NAME (Pre-made default):"
 Write-Host "`n$PotentialPrinterInTuneName`n"
-    Write-Log "     - DESCRIPTION:"
-write-host "
-Department: $DEPARTMENT `n"
-if($Asset) {Write-Host "Asset: $Asset `n"}
-if ($Location) {Write-Host "Location: $Location `n"}
-Write-host "---`n
+    Write-Log "     - DESCRIPTION (Pre-made default):"
+
+# if($Asset) {Write-Host "Asset: $Asset `n"}
+# if ($Location) {Write-Host "Location: $Location `n"}
+
+$AppDescription = "Department: $DEPARTMENT `n
+Asset: $Asset `n
+Location: $Location `n
+Model: $Model  `n
+PrinterIP: $PrinterIP `n
+---`n
+POWERDEPLOY DATA:
+
 Target Repo: $RepoUrl
 Target Branch: $Global:RepoBranch`n
 Source Repo: $GitURL
 Source Branch: $GitBranch
 Source Commit: $gitCommit`n
-Verified: (Enter test date and test commit ver)`n"
+Verified: $Verified`n"
 
-    Write-Log "     - Publisher: Your organization name"
-    Write-Log "     - Version: "
+    write-host $AppDescription
+
+    Write-Log "     - PUBLISHER: Your organization name (default is PowerDeploy)"
+    Write-Log "     - VERSION: "
     
     Write-Host "`n$gitCommit`n"
     
@@ -1687,13 +1700,9 @@ Function WindowsApp--InTune-Setup{
     Write-Log "Next we will manually create a Win32 application in InTune for this app using the new intunewin file, script, and install command."
     Write-Log ""
 
-    if ($Global:DeployMode -eq "Production"){
 
-            $PotentialAppInTuneName = "APP: $ApplicationName"
 
-    } else {
-            $PotentialAppInTuneName = "APP: $ApplicationName [$Global:DeployMode]"
-    }
+
     # Specs of endpoint target repo
         # $Global:DeployMode
         # $RepoUrl
@@ -1720,6 +1729,32 @@ Function WindowsApp--InTune-Setup{
         $CurrentGitURL = git remote get-url origin
 
 
+    # Get the potential name sorted out
+    if($DisplayName -eq "" -or $null -eq $DisplayName){
+
+        $PotentialAppInTuneName = "APP: $DisplayName"
+
+    } else {
+
+        $PotentialAppInTuneName = "APP: $ApplicationName"
+
+    }
+
+    if ($Global:DeployMode -ne "Production"){
+
+            $PotentialAppInTuneName = "APP: $PotentialAppInTuneName [MODE: $Global:DeployMode] [VER: $gitCommit]"
+
+    }
+
+
+
+    if($publisher -eq "" -or $null -eq $publisher){$publisher = "PowerDeploy"}
+    if($AppDescription -eq "" -or $null -eq $AppDescription){$AppDescription = "N/A"}
+    if($PreRequisites -eq "" -or $null -eq $PreRequisites){$PreRequisites = "N/A"}
+    if($Version -eq "" -or $null -eq $Version){$Version = "N/A"}
+    if($PackagedVersion -eq "" -or $null -eq $PackagedVersion){$PackagedVersion = "N/A"}
+    #if($PackagedVersion -eq "" -or $null -eq $PackagedVersion){$PackagedVersion = "N/A"}
+
     Write-Log ""
     Write-Log "InTune Win32 Application creation instructions:" "WARNING"
     Write-Log ""           
@@ -1735,19 +1770,63 @@ Function WindowsApp--InTune-Setup{
     Pause   
     Write-Log "" 
     Write-Log " 3 - APP INFORMATION:"
-    write-log "     - Name: follow your org naming conventions"
-    Write-Log "         - What I recommend: ""$PotentialAppInTuneName"""
+    write-log "     - NAME (Pre-made default):"
+    Write-Host "`n$PotentialAppInTuneName`n"
+    #Write-Log "         - What I recommend: ""$PotentialAppInTuneName"""
 
-                    $Global:DeployMode = "PUBLIC-DEVELOPMENT"
-                $RepoUrl = $OfficialPublicRepoURL
-                $Global:RepoBranch = "dev"
+    # $Global:DeployMode = "PUBLIC-DEVELOPMENT"
+    # $RepoUrl = $OfficialPublicRepoURL
+    # $Global:RepoBranch = "dev"
 
-    Write-Log "     - Description: Up to your descretion. You could use the current repo commit number. Copying the description from Windows Store, App website, etc could be beneficial."
-    Write-Log "         - Sample Description with your commit #: `n`nPowered by PowerDeploy `n`nInstallMethod: $InstallMethod `nEndPoint Deployment Mode:$Global:DeployMode `nEndpoint Deployment Environment:`n   Git URL: $RepoUrl `n   Git Branch: $Global:RepoBranch `nThis Win32App Development Environment:`n   Git URL: $CurrentGitURL `n   Git Branch: $CurrentGitBranch `n   Git Commit Ver: $CurrentGitVer`n"
-    Write-Log "     - Publisher: Look up the publisher if you are not sure. You can check the Windows Store, app website, etc."
-    Write-Log "     - Version: Recommend to leave blank unless you are using a static MSI installer with a set version."
-    Write-Log "     - Category: Choose an existing category or create a new one here: https://learn.microsoft.com/en-us/intune/intune-service/apps/apps-add#create-and-edit-categories-for-apps"
-    Write-Log "     - Logo: Optional - You could create something with Canva using your organization logo, but standardize it"
+    # Write-Log "     - Description: Up to your descretion. You could use the current repo commit number. Copying the description from Windows Store, App website, etc could be beneficial."
+    # Write-Log "         - Sample Description with your commit #: `n`nPowered by PowerDeploy `n`nInstallMethod: $InstallMethod `nEndPoint Deployment Mode:$Global:DeployMode `nEndpoint Deployment Environment:`n   Git URL: $RepoUrl `n   Git Branch: $Global:RepoBranch `nThis Win32App Development Environment:`n   Git URL: $CurrentGitURL `n   Git Branch: $CurrentGitBranch `n   Git Commit Ver: $CurrentGitVer`n"
+    
+    Write-Log "     - DESCRIPTION (Pre-made default):"
+
+# if($Asset) {Write-Host "Asset: $Asset `n"}
+# if ($Location) {Write-Host "Location: $Location `n"}
+
+$AppDescription = "
+
+ApplicationName: $ApplicationName
+
+AppDescription: $AppDescription
+
+InstallMethod: $InstallMethod
+Target Version: $Version
+Packaged Version: $PackagedVersion
+PreRequisites $PreRequisites
+
+---`n
+POWERDEPLOY DATA:
+
+Target Repo: $RepoUrl
+Target Branch: $Global:RepoBranch`n
+Source Repo: $GitURL
+Source Branch: $GitBranch
+Source Commit: $gitCommit`n
+Verified: $Verified`n"
+
+    write-host $AppDescription
+    
+    
+    #Write-Log "     - Publisher: Look up the publisher if you are not sure. You can check the Windows Store, app website, etc."
+    Write-Log "     - PUBLISHER: "
+    `n
+    If ($publisher -eq "N/A"){Write-Host "Currently empty. Look up the publisher if you are not sure. You can check the Windows Store, app website, etc."} else {Write-Host "$Publisher"}
+    `n
+    #Write-Log "     - Version: Recommend to leave blank unless you are using a static MSI installer with a set version."
+    Write-Log "     - VERSION:"
+    `n
+    #If ($VERSION -eq "N/A"){Write-Host "Currently empty."} else {Write-Host "$Publisher"}
+    If ($PackagedVersion -ne "N/A"){Write-Host "$PackagedVersion"} Elseif($Version -ne "N/A"){ Write-Host "$Version"} else { Write-Host "N/A"}
+    `n
+    #Write-Log "     - Category: Choose an existing category or create a new one here: https://learn.microsoft.com/en-us/intune/intune-service/apps/apps-add#create-and-edit-categories-for-apps"
+    Write-Log "     - CATEGORY:"
+    `n
+    If($Category -ne "" -and $Category -ne $null) {Write-Host "$Category"} else {Write-Host "Currently empty. Choose an existing category or create a new one here: https://learn.microsoft.com/en-us/intune/intune-service/apps/apps-add#create-and-edit-categories-for-apps"}
+    `n
+    Write-Log "     - LOGO: Optional - You could create something with Canva using your organization logo, but standardize it"
     Write-Log "     - Everything else on this page is up to your discretion."
     Write-Log ""
     Pause   
