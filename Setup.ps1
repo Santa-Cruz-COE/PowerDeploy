@@ -803,6 +803,13 @@ function Printer--InTune-Setup{
 
         }
 
+        # Specs of working repo
+            # Commit of the local repo, plus a marker if the packaged Git-Runner has uncommitted edits
+            $CurrentGitVer = git -C $RepoRoot rev-parse --short HEAD 2>$null
+            if (-not $CurrentGitVer) { $CurrentGitVer = "unknown" }
+            $RunnerChanges = git -C $RepoRoot status --porcelain -- "Templates/Git-Runner_TEMPLATE.ps1"
+            if ($RunnerChanges) { $CurrentGitVer = "$CurrentGitVer.UnstagedChanges" }
+
     if ($Department){
         $PRn = "PRINTER - $DEPARTMENT"
     } else {
@@ -814,7 +821,7 @@ function Printer--InTune-Setup{
             $PotentialPrinterInTuneName = "$PRn"+": $PrinterName"
 
     } else {
-            $PotentialPrinterInTuneName = "$PRn"+": $PrinterName [$Global:DeployMode] [VER: $gitCommit]"
+            $PotentialPrinterInTuneName = "$PRn"+": $PrinterName [$Global:DeployMode] [VER: $CurrentGitVer]"
     }
         
     Clear
@@ -869,7 +876,7 @@ Target Repo: $RepoUrl
 Target Branch: $Global:RepoBranch`n
 Source Repo: $GitURL
 Source Branch: $GitBranch
-Source Commit: $gitCommit`n
+Source Commit: $CurrentGitVer`n
 Verified: $Verified`n"
 
     write-host $AppDescription
@@ -877,7 +884,7 @@ Verified: $Verified`n"
     Write-Log "     - PUBLISHER: Your organization name (default is PowerDeploy)"
     Write-Log "     - VERSION: "
     
-    Write-Host "`n$gitCommit`n"
+    Write-Host "`n$CurrentGitVer`n"
     
     Write-Log "     - Category: Printers (Create this category if you do not already have, it will take some time to show up: https://learn.microsoft.com/en-us/intune/intune-service/apps/apps-add#create-and-edit-categories-for-apps)"
     Write-Log "     - Logo: Optional - You could create something with Canva using your organization logo, but standardize it"
@@ -1709,40 +1716,27 @@ Function WindowsApp--InTune-Setup{
         # $Global:RepoBranch
 
     # Specs of working repo
-        # Get current git commit ver
-        $CurrentGitVer = git rev-parse --short HEAD 2>&1
-
-        $CurrentGitBranch = git branch --show-current
-
-        # Check if there are uncommited changes
-        $Changes = git status; if($Changes -match "nothing to commit") {
-            
-            #nothing to worry about, up to date
-            
-        }else{
-            
-            #uncommitted changes
-            $CurrentGitVer = "$CurrentGitVer.UnstagedChanges"
-
-        }
-
-        $CurrentGitURL = git remote get-url origin
+        # Commit of the local repo, plus a marker if the packaged Git-Runner has uncommitted edits
+        $CurrentGitVer = git -C $RepoRoot rev-parse --short HEAD 2>$null
+        if (-not $CurrentGitVer) { $CurrentGitVer = "unknown" }
+        $RunnerChanges = git -C $RepoRoot status --porcelain -- "Templates/Git-Runner_TEMPLATE.ps1"
+        if ($RunnerChanges) { $CurrentGitVer = "$CurrentGitVer.UnstagedChanges" }
 
 
     # Get the potential name sorted out
     if($DisplayName -eq "" -or $null -eq $DisplayName){
 
-        $PotentialAppInTuneName = "APP: $DisplayName"
+        $PotentialAppInTuneName = "APP: $ApplicationName"
 
     } else {
 
-        $PotentialAppInTuneName = "APP: $ApplicationName"
+        $PotentialAppInTuneName = "APP: $DisplayName"
 
     }
 
     if ($Global:DeployMode -ne "Production"){
 
-            $PotentialAppInTuneName = "APP: $PotentialAppInTuneName [MODE: $Global:DeployMode] [VER: $gitCommit]"
+            $PotentialAppInTuneName = "$PotentialAppInTuneName [MODE: $Global:DeployMode] [VER: $CurrentGitVer]"
 
     }
 
@@ -1786,7 +1780,7 @@ Function WindowsApp--InTune-Setup{
 # if($Asset) {Write-Host "Asset: $Asset `n"}
 # if ($Location) {Write-Host "Location: $Location `n"}
 
-$AppDescription = "
+$TheAppDescription = "
 
 ApplicationName: $ApplicationName
 
@@ -1795,7 +1789,7 @@ AppDescription: $AppDescription
 InstallMethod: $InstallMethod
 Target Version: $Version
 Packaged Version: $PackagedVersion
-PreRequisites $PreRequisites
+PreRequisites: $PreRequisites
 
 ---`n
 POWERDEPLOY DATA:
@@ -1804,28 +1798,28 @@ Target Repo: $RepoUrl
 Target Branch: $Global:RepoBranch`n
 Source Repo: $GitURL
 Source Branch: $GitBranch
-Source Commit: $gitCommit`n
+Source Commit: $CurrentGitVer`n
 Verified: $Verified`n"
 
-    write-host $AppDescription
+    write-host $TheAppDescription
     
     
     #Write-Log "     - Publisher: Look up the publisher if you are not sure. You can check the Windows Store, app website, etc."
     Write-Log "     - PUBLISHER: "
-    `n
+    Write-Host "`n"
     If ($publisher -eq "N/A"){Write-Host "Currently empty. Look up the publisher if you are not sure. You can check the Windows Store, app website, etc."} else {Write-Host "$Publisher"}
-    `n
+    Write-Host "`n"
     #Write-Log "     - Version: Recommend to leave blank unless you are using a static MSI installer with a set version."
     Write-Log "     - VERSION:"
-    `n
+    Write-Host "`n"
     #If ($VERSION -eq "N/A"){Write-Host "Currently empty."} else {Write-Host "$Publisher"}
     If ($PackagedVersion -ne "N/A"){Write-Host "$PackagedVersion"} Elseif($Version -ne "N/A"){ Write-Host "$Version"} else { Write-Host "N/A"}
-    `n
+    Write-Host "`n"
     #Write-Log "     - Category: Choose an existing category or create a new one here: https://learn.microsoft.com/en-us/intune/intune-service/apps/apps-add#create-and-edit-categories-for-apps"
     Write-Log "     - CATEGORY:"
-    `n
+    Write-Host "`n"
     If($Category -ne "" -and $Category -ne $null) {Write-Host "$Category"} else {Write-Host "Currently empty. Choose an existing category or create a new one here: https://learn.microsoft.com/en-us/intune/intune-service/apps/apps-add#create-and-edit-categories-for-apps"}
-    `n
+    Write-Host "`n"
     Write-Log "     - LOGO: Optional - You could create something with Canva using your organization logo, but standardize it"
     Write-Log "     - Everything else on this page is up to your discretion."
     Write-Log ""
