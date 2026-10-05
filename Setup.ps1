@@ -854,7 +854,7 @@ Department: $DEPARTMENT `n"
 if($Asset) {Write-Host "Asset: $Asset `n"}
 if ($Location) {Write-Host "Location: $Location `n"}
 Write-host "---`n
-Target Repo: $RepoUrl`n
+Target Repo: $RepoUrl
 Target Branch: $Global:RepoBranch`n
 Source Repo: $GitURL
 Source Branch: $GitBranch
@@ -862,7 +862,10 @@ Source Commit: $gitCommit`n
 Verified: (Enter test date and test commit ver)`n"
 
     Write-Log "     - Publisher: Your organization name"
-    Write-Log "     - Version: $gitCommit"
+    Write-Log "     - Version: "
+    
+    Write-Host "`n$gitCommit`n"
+    
     Write-Log "     - Category: Printers (Create this category if you do not already have, it will take some time to show up: https://learn.microsoft.com/en-us/intune/intune-service/apps/apps-add#create-and-edit-categories-for-apps)"
     Write-Log "     - Logo: Optional - You could create something with Canva using your organization logo, but standardize it"
     Write-Log ""   
