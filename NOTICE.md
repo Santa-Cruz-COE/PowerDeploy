@@ -1,6 +1,6 @@
 # NOTICE
 
-## AdminScriptSuite
+## PowerDeploy
 
 **Copyright © 2025 Santa Cruz County Office of Education**
 
@@ -41,7 +41,7 @@ If you fork or modify this project, you **must** remove or replace all reference
 You **may** use the trademarks for:
 
 - Accurate attribution in the NOTICE file (as required by Apache 2.0)
-- Factual statements about the origin of the software (e.g., "Based on AdminScriptSuite, originally developed by Santa Cruz COE")
+- Factual statements about the origin of the software (e.g., "Based on PowerDeploy, originally developed by Santa Cruz COE")
 - Links to the official repository
 
 ---
@@ -52,7 +52,7 @@ This project is maintained by **Adrian Mandel** on behalf of the Santa Cruz Coun
 
 | | |
 |---|---|
-| **Repository** | <https://github.com/Adrian-Mandel/PowerDeploy> |
+| **Repository** | <https://github.com/Santa-Cruz-COE/PowerDeploy> |
 | **Maintainer** | [@Adrian-Mandel](https://github.com/Adrian-Mandel) |
 | **Organization** | [Santa Cruz County Office of Education](https://santacruzcoe.org) |
 
@@ -60,12 +60,31 @@ This project is maintained by **Adrian Mandel** on behalf of the Santa Cruz Coun
 
 ## Third-Party Components
 
-AdminScriptSuite may include or depend on the following third-party components:
+PowerDeploy may include or depend on the following third-party components:
 
 | Component | License | Use |
 |-----------|---------|-----|
 | WinGet | MIT | Software package management |
 | Microsoft.WinGet.Client | MIT | PowerShell module for WinGet |
+
+**Bundled in this repository:**
+
+| Component | License | Use |
+|-----------|---------|-----|
+| `AdobeUninstaller.exe`, `AdobeGenuineCleaner.exe`, `Creative Cloud Uninstaller (x64).exe`, `Creative Cloud Uninstaller (x86).exe` (in `Uninstallers\Adobe_Uninstaller_Suite\`) | © Adobe; not covered by this project's license | Adobe Creative Cloud full cleanup |
+
+**Downloaded at runtime (not bundled):**
+
+| Component | License | Use |
+|-----------|---------|-----|
+| Git for Windows | GPLv2 | Installed on endpoints by the runner to clone/pull the repository |
+| Microsoft App Installer (WinGet) package and Microsoft.VCLibs | Microsoft's terms | Installed on endpoints by the WinGet bootstrap when WinGet is missing |
+| Microsoft Win32 Content Prep Tool (`IntuneWinAppUtil.exe`) | Microsoft's terms | Builds `.intunewin` packages on the admin workstation |
+| `winget-install` (PowerShell Gallery) | Publisher's terms | Fallback WinGet bootstrap |
+| `Invoke-CommandAs` (PowerShell Gallery) | Publisher's terms | Runs WinGet checks in the logged-in user's context |
+| PowerShellGet / NuGet package provider | Microsoft's terms | Required to install the PowerShell Gallery modules above |
+| Az.Accounts / Az.Storage | Microsoft's terms | Entra-auth blob downloader prototype only |
+| Office Deployment Tool | Microsoft's terms | Microsoft Office install recipe |
 
 If additional third-party components are added, they will be documented here with their respective licenses.
 

@@ -33,7 +33,7 @@ flowchart LR
 
 ## What it is *not* (the common misconceptions)
 
-- **It is not a cloud service, and there is no "cloud computing" in it.** Nothing runs in the cloud. The cloud pieces are a file cabinet (Azure storage) and an instruction manual (GitHub). All the actual work happens on each computer.
+- **It is not a cloud service, and there is no "cloud computing" in it.** Nothing runs in the cloud. The cloud pieces are a file cabinet (Azure storage) and an instruction manual (GitHub). Some software is downloaded directly from its maker's official site, the same way a technician would download it by hand. All the actual work happens on each computer.
 - **There is no server** — nothing new to patch, back up, or fail over. If one computer has a problem, it affects that one computer.
 - **There is no subscription or per-device fee.** The only new cost is file storage — a few dollars per month for the whole organization.
 - **It does not touch student data.** It installs printers and applications; that is all it does.
@@ -58,5 +58,5 @@ The system does its job well; the current work is making it easier for *people*:
 **Three questions we hear most:**
 
 1. **"Is there a cloud compute cost we're not seeing?"** No. Nothing executes in the cloud, so there is nothing metered to pay for. The Azure bill is file storage only — single-digit dollars per month.
-2. **"What happens if GitHub or Azure is unreachable?"** Nothing breaks. Printers and software already installed keep working — the system is only involved when something new is installed or repaired. New installs simply wait until the connection returns.
+2. **"What happens if GitHub or Azure is unreachable?"** Nothing that is already installed breaks — printers and software keep working. New installs wait until the connection returns. In the meantime, Intune's status reports may temporarily show errors, because the routine checks that confirm each item is still in place also need to reach GitHub.
 3. **"Who can change what gets installed on our computers?"** Only staff with write access to our script library and file storage — and every change is recorded with author, date, and content. We treat that access with the same care as any administrative credential.

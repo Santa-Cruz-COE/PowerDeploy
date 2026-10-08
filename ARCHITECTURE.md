@@ -1,6 +1,6 @@
 # PowerDeploy Architecture
 
-**Status of this document:** Accurate as of 2026-07-06 (verified against commit `9f92734`). This is the canonical architecture reference for PowerDeploy. It is written for three audiences at once: engineers extending the system, IT administrators at adopting organizations (including security reviewers), and AI assistants helping with deployment, troubleshooting, or development. Where the code and this document disagree, the code is correct and this document has a bug — please fix it in the same commit that changes the behavior.
+**Status of this document:** Accurate as of 2026-10-07 (verified against commit `b709aab`). This is the canonical architecture reference for PowerDeploy. It is written for three audiences at once: engineers extending the system, IT administrators at adopting organizations (including security reviewers), and AI assistants helping with deployment, troubleshooting, or development. Where the code and this document disagree, the code is correct and this document has a bug — please fix it in the same commit that changes the behavior.
 
 > **Maintenance rule:** any change to a JSON schema, the registry contract, an exit-code convention, or an execution flow MUST update this document in the same pull request.
 
@@ -18,7 +18,7 @@ The one-sentence mental model:
 
 These misconceptions come up repeatedly, so they are stated explicitly:
 
-- **There is no cloud compute.** Nothing executes in Azure or anywhere else in the cloud. The only cloud interactions in the entire codebase are (a) HTTPS `GET` requests for files in Azure Blob Storage, and (b) `git clone`/`git pull` against GitHub.
+- **There is no cloud compute.** Nothing executes in Azure or anywhere else in the cloud. All network activity is outbound downloads started by the endpoint (or by the admin workstation running Setup.ps1), over HTTPS except where a `URL_Download` entry's URL says otherwise: files from Azure Blob Storage, `git clone`/`git pull` against GitHub, and installers from public Microsoft/vendor sources (WinGet, Git for Windows, `URL_Download` entries, the Office Deployment Tool). §8 lists PowerDeploy's fixed hosts; WinGet packages and `URL_Download` entries may require additional publisher-specific hosts.
 - **There is no server.** No service to patch, back up, or fail over. The failure domain of any operation is a single endpoint.
 - **There is no agent.** Nothing is resident on endpoints except the cloned script repository, logs, and the standard Windows/Intune infrastructure the org already runs.
 - **There is no telemetry.** Results exist as exit codes (consumed by Intune) and log files on each machine. Nothing phones home.
@@ -28,7 +28,7 @@ These misconceptions come up repeatedly, so they are stated explicitly:
 
 ## 2. The core mechanism: the Runner pattern
 
-Every Intune "Win32 app" PowerDeploy creates contains exactly **one file**: `Git-Runner_TEMPLATE.ps1`, wrapped in a `.intunewin` package. The real payload is never inside the package.
+Every Intune "Win32 app" PowerDeploy creates contains exactly **one file**: `Git-Runner_TEMPLATE.ps1`, wrapped in a `.intunewin` package. The real payload is never inside the package. (One exception: `Registry_Remediations--InTune-Setup` can optionally package its parameter-stamped copy of Git-Runner — with the org's registry values, including SAS keys and any PAT, embedded — as a `.intunewin`, as an alternative to Proactive Remediations. The payload is still pulled from git. See §5.4 and §7.2.)
 
 At install time on the endpoint (running as SYSTEM), Git-Runner:
 
@@ -88,7 +88,11 @@ The generated install command has this exact shape (one line):
 | `Other_Tools\Generate_Install-Command.ps1` | The artifact factory: builds the Base64-parameterized install/uninstall/detect commands and the org-config remediation script pair. Called by Setup.ps1's wizards. | |
 | `Other_Tools\Generate_Custom-Script_FromTemplate.ps1` | Produces self-contained, parameter-stamped copies of Git-Runner (for pasting into Intune script fields). | |
 | `Other_Tools\Security_Manager.ps1` | ACL enforcer for endpoint folders and the registry key (§7). **It does not manage keys or secrets** despite the name. | |
-| `Other_Tools\Export-PrinterServer-CSV.ps1` | Exports an existing print server's printers to CSV. The matching *importer* (CSV → `PrinterData.json`) is planned but does not exist yet. | |
+| `Other_Tools\Export-PrinterServer-CSV.ps1` (+ `_RUNNER.bat`) | Run on the print server: exports its printer queues to a reviewable CSV in `TEMP\PrintServer_Exports`, pre-filling `PortName` (zero-padded IP), a suggested `PresetDriver`, the bare `INFFile`, and `Location`/`Comment`. | Exports **every** queue — the TCP/IP-only filter is commented out, so non-TCP/IP queues must be pruned during review. `*_EXCLUDED` columns are reference-only. |
+| `Other_Tools\Convert-PrinterCSV-ToJSON.ps1` (+ `_RUNNER.bat`) | Reviewed CSV → standalone `printers[]`/`drivers[]` JSON (written to `TEMP\PrintServer_Exports`) for the admin to merge by hand. | Drivers de-duplicated on `PresetDriver`; `DriverZip` is left as a placeholder; any non-empty extra column is carried into `printers[]`. Never modifies the live catalog. |
+| `Other_Tools\Export-PrinterServer-Drivers.ps1` | Run on the print server: zips the in-use drivers from its Driver Store into blob-ready zips plus matching `drivers[]` entries (`TEMP\PrintServer_Drivers`). | Falls back to `pnputil /export-driver` (needs admin) only when a driver's INF is outside the Driver Store. |
+| `Other_Tools\Convert-VendorPack-ToDriverZip.ps1` | Vendor ZIP / self-extracting EXE (needs 7-Zip) / folder → `DriverZip` plus a `drivers[]` entry (`TEMP\DriverPacks`). | Picks the INF by the printer models it declares (optionally narrowed by `-DriverName`); each INF's architecture is reported, and any remaining ambiguity is a pick-list. Exposed in Setup as `Printer--Convert-Vendor-DriverPack`. |
+| Other helpers | `Installers\Install-DotNET.ps1` (.NET via WinGet, or .NET Framework 3.5 via Windows Optional Features; used by the `.NET_3.5` catalog entry); `Installers\Install-WinGet_RUNNER.bat` (manual launcher for `Install-WinGet.ps1`); `Configurators\Configure-WindowsOptionalFeatures.ps1` (enable/disable/check a Windows Optional Feature); `Uninstallers\Adobe_Uninstaller_Suite\` (full Adobe Creative Cloud cleanup using bundled Adobe tools; Setup menu `Adobe-Apps-FullCleanup--Uninstall-Local`); `Other_Tools\General_Windows-Fixer.ps1` (runs `sfc /scannow` and DISM health checks/repair); `Other_Tools\Break-DellCommandUpdate.ps1` (test fixture that deliberately breaks Dell Command Update so the DCU full-clean recipe can be exercised). | |
 | `Downloaders\DownloadFrom-AzureBlob-SAS.ps1` | The production blob download path (SAS-token URL). | |
 | `Downloaders\DownloadFrom-AzureBlob-AADauth.ps1` | Prototype of a SAS-less future (Entra ID auth). Interactive-only, refuses SYSTEM — **not production-ready**; kept as the designed exit ramp from SAS keys. |
 | `Templates\ApplicationData_TEMPLATE.json` | **Doubles as the live public catalog** (§4.2) — the app orchestrator parses this file directly. |
@@ -137,11 +141,13 @@ Top level: `{ "Applications": [ <entry>, ... ] }`
 |---|---|---|
 | `ApplicationName` | yes (unique) | The primary key. Used for menu selection, `PreRequisites` references, and log filenames. |
 | `InstallMethod` | yes | One of: `WinGet`, `MSI-Private-AzureBlob`, `EXE-Private-AzureBlob`, `URL_Download`, `Custom_Script`. (`MSI-Online` appears in dispatch but is an unimplemented stub — do not use.) |
-| `DisplayName` | required whenever `MSI_Registry` detection applies | Matched as a **wildcard substring** (`-like "*<DisplayName>*"`) against both HKLM Uninstall hives. Too generic ⇒ matches sibling products; too specific ⇒ breaks on locale/edition changes. |
+| `DisplayName` | required whenever `MSI_Registry` detection applies | Matched as a **wildcard substring** (`-like "*<DisplayName>*"`) against both HKLM Uninstall hives. Too generic ⇒ matches sibling products; too specific ⇒ breaks on locale/edition changes. Also used by Setup for the suggested Intune name `APP: <DisplayName>` (falls back to `ApplicationName`). |
 | `DetectMethod` | no | `WinGet`, `MSI_Registry`, `AppXpackage`, `AppXProvisionedPackage`, `CIM`, `All`. Auto-default: `WinGet` method ⇒ `WinGet`; every other method ⇒ `MSI_Registry`. |
 | `UninstallType` | no | `All` (try every method until one verifies), `Remove-App-WinGet`, or the literal name of any `Remove-App-*` function in `General_Uninstaller.ps1`. |
 | `PreRequisites` | no | Comma-separated list of other `ApplicationName`s, installed first. **Resolved one level deep only** — prerequisites of prerequisites are not installed. |
 | `Version` | no | Exact version for WinGet install/detection. |
+| `AppDescription`, `Publisher`, `Category`, `PackagedVersion` | no (Setup only) | Prefill the Intune app's Description / Publisher / Category / Version in the app wizard. `Publisher` defaults to `PowerDeploy`; the Version prefill is `PackagedVersion`, else `Version`. Not read by any installer. |
+| `Verified` | no (Setup only) | Free text printed in the generated Intune description. |
 
 **Per-method fields:**
 
@@ -167,19 +173,22 @@ Top level: `{ "printers": [...], "drivers": [...] }`
 | `PortName` | yes | TCP/IP port name. House convention: zero-padded dotted IP (`010.009.028.106`) so ports sort and deduplicate cleanly. Convention only — not validated. |
 | `PrinterIP` | yes | The actual IP (`10.9.28.106`). |
 | `PresetDriver` | no | Foreign key into `drivers[]`. If present, the driver entry's fields are used; if absent, the printer entry must carry `DriverName`/`INFFile`/`DriverZip` inline. |
+| `Department`, `Location`, `Model`, `Asset`, `Verified` | no (Setup only) | Used only by the printer wizard: `Department` goes into the suggested Intune name (`PRINTER - <Department>: <name>`); all five are printed in the generated Intune description. |
+
+The same rule as §4.2 applies here: the printer installer turns **every** property of the selected printer (and its driver entry) into a PowerShell variable (`Set-VariablesFromObject`), so the schema *is* the variable namespace. `Convert-PrinterCSV-ToJSON.ps1` carries any non-empty extra CSV column into `printers[]`, so CSV column names become variable names too — avoid names that collide with the installer's own variables.
 
 | `drivers[]` field | Required | Meaning |
 |---|---|---|
 | `PresetDriver` | yes (unique key) | Convention: `VENDOR_UPD_PCL6_WIN_X64`. One driver definition serves any number of printers. |
 | `DriverName` | yes | Must **exactly** match the driver name advertised inside the INF (e.g. `HP Universal Printing PCL 6`), or `Add-PrinterDriver` fails. |
-| `INFFile` | yes | The `.inf` filename inside the driver zip. |
+| `INFFile` | yes | The bare `.inf` filename (not a path). Looked for at the zip root first, otherwise searched recursively; duplicate names are resolved by the INF's `[Manufacturer]` architecture decoration (`NTamd64` on 64-bit, `NTx86` on 32-bit), then the shallowest path. |
 | `DriverZip` | yes | Container-relative forward-slash blob path to the driver zip, e.g. `printers/Drivers/HP/HP_Universal_Printing_PCL_6/upd-pcl6-x64-7.9.0.26347.zip`. |
 
-Install sequence on the endpoint: download zip via SAS → extract to `<zip>-EXTRACTED` → `pnputil /add-driver` (run from inside the extracted folder — a deliberate workaround for pnputil path-length/quoting failures; preserve in any rewrite) → `Add-PrinterDriver` → `Add-PrinterPort` (an existing port of the same name is **reused as-is**, its IP is not corrected) → `Add-Printer` → verify by re-detection.
+Install sequence on the endpoint: download zip via SAS → extract to `<zip>-EXTRACTED` → `pnputil /add-driver` (run from inside the folder containing the chosen INF, not the extract root — a deliberate workaround for pnputil path-length/quoting failures; preserve in any rewrite) → `Add-PrinterDriver` → `Add-PrinterPort` (an existing port of the same name is **reused as-is**, its IP is not corrected) → `Add-Printer` → verify by re-detection.
 
 ### 4.4 Endpoint file layout
 
-Everything lives under the **working directory**, `C:\ProgramData\PowerDeploy--<MODE>` (see §6.5 for modes):
+Everything lives under the **working directory**, `C:\ProgramData\PowerDeploy--<MODE>` (see §6 for modes):
 
 ```
 C:\ProgramData\PowerDeploy--PRODUCTION\
@@ -194,7 +203,7 @@ C:\ProgramData\PowerDeploy--PRODUCTION\
 
 Log files are named `<ScriptName>.<Qualifier>._Log_<yyyyMMdd_HHmmss>.log`; entries are `[timestamp] [LEVEL] message` with levels `INFO / INFO2 / WARNING / ERROR / SUCCESS / DRYRUN`. Appends use a 5-attempt retry loop specifically to coexist with CrowdStrike/Defender file scanning.
 
-On the **admin workstation**, Setup.ps1's wizards emit artifacts to sibling folders of the repo: `Temp\IntuneWin_Output\<timestamp>\` (packages), `TEMP\Intune_Install-Commands_Output\` (command `.txt` files, also copied to clipboard), `TEMP\Custom_Scripts_Output\` (stamped runner scripts).
+On the **admin workstation**, Setup.ps1's wizards emit artifacts to sibling folders of the repo: `Temp\IntuneWin_Output\<timestamp>\` (packages), `TEMP\Intune_Install-Commands_Output\` (command `.txt` files, also copied to clipboard), `TEMP\Custom_Scripts_Output\` (stamped runner scripts). The printer-migration tools write to `TEMP\PrintServer_Exports\` (CSV and converted JSON), `TEMP\PrintServer_Drivers\` (harvested driver zips), and `TEMP\DriverPacks\` (converted vendor packs). When run outside a PowerDeploy install (no `..\..\TEMP` folder, e.g. copied to a print server), they use a `TEMP\` folder inside their own folder instead.
 
 ### 4.5 Exit-code contract
 
@@ -230,10 +239,12 @@ Split on `],[` boundaries; four `-Param "value"` pairs per group; doubled quotes
 ### 5.2 Creating an Intune deployment (admin, via Setup.ps1)
 
 1. Run `Setup_RUNNER.bat` as admin → pick `Printer--InTune-Setup` or `WindowsApp--InTune-Setup`.
-2. Choose a **deploy mode** (§6.5) — this decides which repo/branch the deployed asset will pull from forever.
-3. Ensure the asset exists in the catalog (today: hand-edit the JSON in the Azure portal blob editor, guided by console instructions — tooling for this is the top roadmap item).
+2. Choose a **deploy mode** (§6) — this decides which repo/branch the deployed asset will pull from forever.
+3. Ensure the asset exists in the catalog. Apps: hand-edit the JSON in the Azure portal blob editor, guided by console instructions. Printers: entries can be generated from an existing print server with the `Other_Tools` export/convert scripts (§3), then merged into `PrinterData.json` by hand.
 4. The wizard packages Git-Runner into a `.intunewin` (downloading Microsoft's `IntuneWinAppUtil.exe` on first use), generates the install/uninstall command `.txt` files and the detection script.
-5. The wizard prints a step-by-step Intune portal walkthrough (app name conventions: `APP: <name> [<mode>]` / `PRINTER : <name> [<mode>]`; install behavior **System**; custom detection script; assignments). The admin transcribes these into the portal by hand.
+5. The wizard prints a step-by-step Intune portal walkthrough with pre-generated Name and Description (plus Version, and for apps Publisher and Category), install behavior **System**, custom detection script, and assignments. Name conventions: `APP: <DisplayName or ApplicationName>`; `PRINTER: <name>` or `PRINTER - <Department>: <name>`. Outside `PRODUCTION` mode a mode tag and the source commit are appended (apps: `[MODE: <mode>] [VER: <commit>]`; printers: `[<mode>] [VER: <commit>]`). The admin transcribes these into the portal by hand.
+
+The app wizard generates commands only for `WinGet`, `MSI-Private-AzureBlob`, `EXE-Private-AzureBlob`, and `URL_Download` entries; a `Custom_Script` entry stops with "Unknown Install Method" (§10).
 
 **Why manual portal steps instead of Graph API automation:** PowerDeploy deliberately holds **zero standing cloud credentials**. It cannot modify the Intune tenant or the storage account; a human with their own portal rights performs every tenant-affecting change. This keeps the tool's blast radius at "one endpoint + whatever a read-only SAS exposes" and keeps the security review small. The cost is manual transcription; the roadmap answer is better generated artifacts, not tenant credentials.
 
@@ -263,7 +274,7 @@ Detection methods (`DetectMethod`): `WinGet` (winget list by exact ID), `MSI_Reg
 
 ### 5.6 Setup.ps1's menu mechanics (for maintainers)
 
-The main menu is built by **reflection**: `Get-Command -Name "*--*"` — any function whose name contains a double dash is auto-listed alphabetically. The `-zz-` infix (instead of `--`) is the convention for *hiding* unfinished functions from the menu. Consequences: menu numbering changes whenever functions are added/renamed (screenshots and runbooks rot), and any new helper containing `--` becomes a menu item. Treat function naming as a public interface.
+The main menu is built by **reflection**: `Get-Command -CommandType Function -Name "*--*"` — any function whose name contains a double dash is auto-listed alphabetically. `WindowsApp--Uninstall-Local` builds its sub-menu the same way from `*--search-and-uninstall`; the `-zz-` infix (instead of `--`, e.g. `JSON-zz-search-and-uninstall`) is the convention for *hiding* unfinished uninstall methods from that sub-menu. Consequences: menu numbering changes whenever functions are added/renamed (screenshots and runbooks rot), and any new helper containing `--` becomes a menu item. Treat function naming as a public interface.
 
 ---
 
@@ -298,7 +309,7 @@ Endpoints pull and execute the fork's branch on every run. The catalog JSONs are
 |---|---|---|
 | Container SAS tokens (2) | `HKLM\SOFTWARE\PowerDeploy` on every endpoint | Registry ACL: SYSTEM + Administrators only, inheritance blocked. Tokens should be generated **read-only, HTTPS-only, with expiry** — note this is convention; nothing validates a pasted token's scope. |
 | `CustomRepoToken` (Git PAT, optional) | Same registry key; also embedded in generated install commands and `.git/config` on endpoints | Same ACL. Prefer a public(ly readable) fork or a fine-grained, read-only PAT. |
-| Both, in transit to endpoints | Inside generated Intune remediation scripts / install commands (Base64 of JSON — **encoding, not encryption**) | Intune script bodies are visible to Intune admins; treat accordingly. |
+| Both, in transit to endpoints | Inside generated Intune remediation scripts / install commands, and the optional org-config `.intunewin` (Base64 of JSON — **encoding, not encryption**) | Intune script bodies are visible to Intune admins; treat accordingly. |
 
 **Known gap (fix in progress):** several scripts currently echo SAS tokens and the PAT into console output and local log files. Log/temp folders are ACL-locked to admins on endpoints, which mitigates but does not excuse this; masking secrets in all log paths is a committed near-term fix. Security reviewers should assume logs may contain secrets until that lands.
 
@@ -323,16 +334,20 @@ No cloud writes of any kind (no Graph, no Azure management APIs, no storage writ
 
 ## 8. Network requirements (egress allow-list)
 
-Endpoints (SYSTEM context) need HTTPS egress to:
+Endpoints (SYSTEM context) need HTTPS egress to PowerDeploy's fixed hosts below, plus any publisher-specific hosts used by the selected WinGet packages or `URL_Download` entries:
 
 | Destination | Purpose |
 |---|---|
 | `<StorageAccountName>.blob.core.windows.net` | Catalogs, private payloads, printer drivers (SAS GET) |
-| `github.com`, `api.github.com`, `codeload.github.com`, `objects.githubusercontent.com` | Repo clone/pull; git-for-windows installer; winget msixbundle fallback |
+| `github.com`, `api.github.com`, `codeload.github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com` | Repo clone/pull; git-for-windows installer; winget msixbundle fallback |
 | `aka.ms`, `*.delivery.mp.microsoft.com`, `cdn.winget.microsoft.com`, `storeedgefd.dsx.mp.microsoft.com` | WinGet bootstrap and package sources (incl. msstore) |
 | `www.powershellgallery.com`, `onegetcdn.azureedge.net` | WinGet-install fallback module, NuGet provider |
+| Hosts in selected WinGet packages' `InstallerUrl` values | The applications' actual installers; these vary by package and publisher |
 | Vendor URLs named in `URL_Download` catalog entries | Direct-download apps (e.g. Adobe CDNs) |
 | `www.microsoft.com`, `officecdn.microsoft.com` | Office Deployment Tool recipe |
+| `download.microsoft.com` | Office Deployment Tool executable (link scraped from `www.microsoft.com`); target of the VCLibs `aka.ms` redirect during WinGet bootstrap |
+
+The **admin workstation** running Setup.ps1 needs `<StorageAccountName>.blob.core.windows.net` (catalogs) plus `github.com`/`raw.githubusercontent.com` (`git fetch`/`git pull` of its own clone, and the `IntuneWinAppUtil.exe` download), and the WinGet source hosts above if the app wizard's optional `winget search` is used. The printer-migration tools in `Other_Tools` (§3) make no network calls; they run locally on the print server or workstation.
 
 School district content filters commonly block several of these for machine (non-user) traffic — verify before pilot.
 
@@ -362,14 +377,15 @@ For adopters and contributors — these are known, acknowledged, and sequenced o
 2. **No JSON schema validation.** Catalog errors surface at install time on endpoints, not at authoring time. (JSON Schema files + a validator are the companion priority.)
 3. **Secrets appear in local logs** (§7.2). Masking is a committed fix.
 4. **Endpoints track branch HEAD** — no release tags/pinning/rollback yet (§7.1).
-5. **Shared code is copy-pasted.** `Write-Log` and the path validator exist in ~28 near-identical copies; fixes must be applied N times. A common module is the planned refactor.
+5. **Shared code is copy-pasted.** `Write-Log` exists in ~29 near-identical copies and the path validator (`Test-PathSyntaxValidity`) in ~19; fixes must be applied N times. A common module is the planned refactor.
 6. **Public catalog shadows private entries by name** (§4.2) — a lookup-order behavior adopters must know.
 7. **Prerequisites resolve one level deep** — not recursively.
-8. **Wizard rough edges** pending fixes: the "test locally" steps in both Intune wizards call renamed functions and fail; the app wizard's inline JSON example prints empty; the config wizard covers 4 of 7 registry values; the shipped printer template contains an `NFFile` (should be `INFFile`) typo that demonstrates limitation #2.
+8. **Wizard rough edges** pending fixes: the config wizard covers 4 of 7 registry values (§4.1); `Set-URL`'s missing-`CustomRepoURL` error message points to a function name that no longer exists (the current one is `Registry_Remediations--InTune-Setup`).
 9. **`SearchAndDestroy_TEMPLATE.json` has no consumer** — it documents an intended bulk-uninstall feature, not a shipped one.
 10. **No automated tests.** `Tests\General_Tester.ps1` is a manual, machine-mutating smoke menu.
 11. **Central observability does not exist by design** — results are per-endpoint exit codes and logs. Multi-endpoint health questions currently mean harvesting logs.
-12. **Windows-only, public Azure cloud only** (blob endpoint suffix is hardcoded), GitHub-hosted repos assumed by mode detection.
+12. **The Intune app wizard cannot package `Custom_Script` entries** (in the public catalog: the Office recipes, Dell Command Update, .NET 3.5). They install locally through Setup.ps1, but their Intune install/uninstall commands and detection script must be set up by hand.
+13. **Windows-only, public Azure cloud only** (blob endpoint suffix is hardcoded), GitHub-hosted repos assumed by mode detection.
 
 ---
 
@@ -382,7 +398,7 @@ For adopters and contributors — these are known, acknowledged, and sequenced o
 | **Working directory** | `C:\ProgramData\PowerDeploy--<MODE>` — the per-mode root for the repo clone, TEMP, and Logs on a machine |
 | **Deploy mode** | Which repo+branch a deployed asset pulls from: PUBLIC-DEVELOPMENT / PUBLIC-TESTING / PRIVATE-DEVELOPMENT / PRODUCTION |
 | **SAS token** | Azure "shared access signature" — an expiring, scoped access string appended to a blob URL; PowerDeploy uses read-only container SAS tokens |
-| **`.intunewin` / Win32 app** | Intune's packaged-app format; in PowerDeploy every package contains only Git-Runner |
+| **`.intunewin` / Win32 app** | Intune's packaged-app format; in PowerDeploy every package contains only Git-Runner — the plain template for apps/printers, a parameter-stamped copy for the optional org-config package (§5.4) |
 | **Proactive Remediation** | Intune's detect-script/remediate-script pair mechanism; PowerDeploy uses it to seed and rotate the org's registry config |
 | **Detection script** | Exit-code-contract script (0 = present) used by Intune and by PowerDeploy's own verification |
 | **Org fork** | An organization's fork of this repository — its change-controlled deployment surface (`CustomRepoURL`) |
