@@ -28,7 +28,7 @@ These misconceptions come up repeatedly, so they are stated explicitly:
 
 ## 2. The core mechanism: the Runner pattern
 
-Every Intune "Win32 app" PowerDeploy creates contains exactly **one file**: `Git-Runner_TEMPLATE.ps1`, wrapped in a `.intunewin` package. The real payload is never inside the package. (One exception: `Registry_Remediations--InTune-Setup` can optionally package its parameter-stamped copy of Git-Runner — with the org's registry values, including SAS keys and any PAT, embedded — as a `.intunewin`, as an alternative to Proactive Remediations. The payload is still pulled from git. See §5.4 and §7.2.)
+Every Intune "Win32 app" PowerDeploy creates contains exactly **one file**: `Git-Runner_TEMPLATE.ps1`, wrapped in a `.intunewin` package. The real payload is never inside the package. (One exception: `OrganizationRegistryEntries--InTune-Setup` can optionally package its parameter-stamped copy of Git-Runner — with the org's registry values, including SAS keys and any PAT, embedded — as a `.intunewin`, as an alternative to Proactive Remediations. The payload is still pulled from git. See §5.4 and §7.2.)
 
 At install time on the endpoint (running as SYSTEM), Git-Runner:
 
@@ -123,7 +123,7 @@ The engine (the repo) is org-agnostic. Everything organization-specific lives in
 | `\Printers` | `PrinterDataJSONpath` | Blob path of the printer catalog, e.g. `printers/PrinterData.json` |
 
 - The key is ACL-locked to `SYSTEM` + `BUILTIN\Administrators` (FullControl, inheritance blocked, 64-bit registry view) by `Configure-Registry.ps1 -Function Lockdown`, re-asserted by Security Manager on every runner execution.
-- This layout is currently defined in three places that must stay in sync by hand: the writer (`Generate_Install-Command.ps1` → `RegRemediationScript`), the reader (`OrganizationCustomRegistryValues-Reader_TEMPLATE.ps1`), and Setup.ps1's expectations. (Consolidating this into one schema is on the roadmap.)
+- This layout is currently defined in three places that must stay in sync by hand: the writer (`Generate_Install-Command.ps1` → `OrgRegistryChangesString`, used by both `RegRemediationScript` and Setup's local writer), the reader (`OrganizationCustomRegistryValues-Reader_TEMPLATE.ps1`), and Setup.ps1's expectations. (Consolidating this into one schema is on the roadmap.)
 - **Known gap:** the interactive config wizard currently collects only four of the seven values (`CustomRepoURL`, `CustomRepoToken`, and both SAS keys); `StorageAccountName` and the two JSON paths ship as parameter defaults in `Generate_Install-Command.ps1` and must be changed there by an adopting org until the wizard is extended.
 
 **Why registry (and not a config file or cloud service):** values can be pushed fleet-wide through Intune Proactive Remediations (a channel every Intune org already has), read under SYSTEM with zero dependencies, ACL-protected at rest, and they survive repo re-clones. The same public engine code serves any org because the org's identity is data on the machine, not code in the repo.
@@ -263,10 +263,12 @@ The app wizard generates commands only for `WinGet`, `MSI-Private-AzureBlob`, `E
 ### 5.4 Org-config seeding and SAS rotation
 
 1. Admin generates container SAS tokens in the Azure portal (read-only, HTTPS-only, expiry per org policy).
-2. `Setup.ps1` → `Registry_Remediations--InTune-Setup` collects the values (keep / replace / CLEAR semantics per value).
+2. `Setup.ps1` → `OrganizationRegistryEntries--InTune-Setup` collects the values (keep / replace / CLEAR semantics per value).
 3. `Generate_Install-Command.ps1 -DesiredFunction RegRemediationScript` emits a **Detect + Remediate script pair** (Git-Runner-wrapped): Detect exits 1 if any of the seven registry values mismatch; Remediate writes them (with ACL lockdown) and re-verifies.
 4. Admin uploads the pair to Intune **Proactive Remediations** ("Run in 64-bit PowerShell: Yes") — or, alternatively, packages the Remediate script as a Win32 app (both channels deliver the same generated script).
 5. **Rotation = re-run this flow with new SAS values.** Endpoints converge on the next remediation cycle. (A thin UI over this generator is roadmap idea #4; the backend already exists.)
+
+**Single machine, by hand:** `Setup.ps1` → `OrganizationRegistryEntries--Local-Setup` asks the same questions (no deployment mode), builds the same `RegistryChanges` string (`Generate_Install-Command.ps1 -DesiredFunction OrgRegistryChangesString`), shows a review, and on confirmation runs `General_RemediationScript-Registry_TEMPLATE.ps1 -Function Remediate -AlsoLockDown $True` locally — the same write, ACL lockdown and read-back the Intune remediation performs. It then makes Security_Manager's registry call (`Configure-Registry.ps1 -KeyOnly $true -KeyPath 'HKLM:\SOFTWARE\PowerDeploy' -Function Lockdown`), because on endpoints Git-Runner runs Security_Manager around the remediation and the template itself only locks keys it creates. Meant for a PC no remediation targets yet; if one later does, its values win.
 
 ### 5.5 Detection and verification model (the reliability core)
 
@@ -413,7 +415,7 @@ For adopters and contributors — these are known, acknowledged, and sequenced o
 5. **Shared code is copy-pasted.** `Write-Log` exists in ~29 near-identical copies and the path validator (`Test-PathSyntaxValidity`) in ~19; fixes must be applied N times. A common module is the planned refactor.
 6. **Public catalog shadows private entries by name** (§4.2) — a lookup-order behavior adopters must know.
 7. **Prerequisites resolve one level deep** — not recursively.
-8. **Wizard rough edges** pending fixes: the config wizard covers 4 of 7 registry values (§4.1); `Set-URL`'s missing-`CustomRepoURL` error message points to a function name that no longer exists (the current one is `Registry_Remediations--InTune-Setup`).
+8. **Wizard rough edges** pending fixes: the config wizards (`OrganizationRegistryEntries--InTune-Setup` and `--Local-Setup`) cover 4 of 7 registry values (§4.1).
 9. **`SearchAndDestroy_TEMPLATE.json` has no consumer** — it documents an intended bulk-uninstall feature, not a shipped one.
 10. **Automated tests cover only the Intune upload feature.** `Tests\IntuneGraphUpload.Tests.ps1` is an offline suite (mock tenant, both PowerShell engines); everything else relies on `Tests\General_Tester.ps1`, a manual, machine-mutating smoke menu.
 11. **Central observability does not exist by design** — results are per-endpoint exit codes and logs. Multi-endpoint health questions currently mean harvesting logs.

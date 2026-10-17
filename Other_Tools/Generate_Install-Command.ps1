@@ -235,10 +235,14 @@ Write-Log ""
 
 
 
-############################################################
-### Example: Create Detect/Remediation Script for InTune ###
-############################################################
-Function RegRemediationScript {
+#####################################################################
+### Organization registry values (shared by Intune and local setup) ###
+#####################################################################
+# The one place the org registry layout and its defaults are defined on the writer side.
+# Returns the bracketed RegistryChanges string that General_RemediationScript-Registry_TEMPLATE.ps1
+# parses. RegRemediationScript wraps it for Intune; Setup.ps1's OrganizationRegistryEntries--Local-Setup
+# passes it straight to the remediation template to write this PC's registry.
+Function OrgRegistryChangesString {
 
     Param(
 
@@ -270,12 +274,8 @@ Function RegRemediationScript {
     Write-Log "CustomRepoURL:              $CustomRepoURL"
     Write-Log "CustomRepoToken:            $CustomRepoToken"
     # End display of parameters
-    Write-Log ""   
-    Write-Log "Generating Detect/Remediation scripts for Registry changes..." -ForegroundColor Yellow
+    Write-Log ""
     # Choose the registry changes.
-
-        # Declare as list to bypass the Git Runner's function of putting passed string params into double quotes. This breaks the pass to the remediation script.
-        $RegistryChanges = @()
 
         # declare as string that will be parsed later
         [string]$RegistryChangesSTRING = ""
@@ -355,6 +355,43 @@ Function RegRemediationScript {
 
 
         # Make as many as you need
+
+    Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END"
+    Write-Log ""
+
+    return $RegistryChangesSTRING
+}
+
+############################################################
+### Example: Create Detect/Remediation Script for InTune ###
+############################################################
+Function RegRemediationScript {
+
+    # Same parameters as OrgRegistryChangesString; the defaults live there only, so anything not
+    # supplied here falls through to them.
+    Param(
+
+        $StorageAccountName,
+
+        $PrinterDataJSONpath,
+        $PrinterContainerSASkey,
+
+        $ApplicationDataJSONpath,
+        $ApplicationContainerSASkey,
+
+        $CustomRepoURL,
+        $CustomRepoToken
+
+    )
+
+    Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START" -ForegroundColor Yellow
+    Write-Log ""
+    Write-Log "Generating Detect/Remediation scripts for Registry changes..." -ForegroundColor Yellow
+
+        # Declare as list to bypass the Git Runner's function of putting passed string params into double quotes. This breaks the pass to the remediation script.
+        $RegistryChanges = @()
+
+        [string]$RegistryChangesSTRING = OrgRegistryChangesString @PSBoundParameters
 
         # Create a passable object
         $RegistryChangesSTRING = ''''+$RegistryChangesSTRING+''''

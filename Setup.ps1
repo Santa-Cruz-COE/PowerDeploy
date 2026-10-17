@@ -458,7 +458,7 @@ Function Set-URL {
             if ($userinput -eq "3" -or $userinput -eq "4") {
                 # Verify that CustomRepoURL is set
                 if ([string]::IsNullOrWhiteSpace($CustomRepoURL)) {
-                    Write-Log "ERROR: Organization CustomRepoURL is not set in registry. Cannot proceed with PRIVATE-DEVELOPMENT or PRODUCTION mode. Please set your custom org repo by forking the public repo and then set the registry appropriately with your custom URL/token using the following function from this script: Setup--Azure-PowerDeploy_Registry_Remediations_For_Organization" "ERROR"
+                    Write-Log "ERROR: Organization CustomRepoURL is not set in registry. Cannot proceed with PRIVATE-DEVELOPMENT or PRODUCTION mode. Please set your custom org repo by forking the public repo and then set the registry appropriately with your custom URL/token using one of these Setup options: OrganizationRegistryEntries--InTune-Setup (for your fleet) or OrganizationRegistryEntries--Local-Setup (for this PC only)" "ERROR"
                     $modeSelected1 = $False
                 }
             }
@@ -3809,17 +3809,73 @@ Function ParseJSON {
 
 }
 
-# DONE 1/14/26 - Thoroughly tested
-Function Registry_Remediations--InTune-Setup{
+# One organization registry value: show this PC's current value, then keep / replace / CLEAR it.
+# Shared by OrganizationRegistryEntries--InTune-Setup and OrganizationRegistryEntries--Local-Setup.
+Function Read-OrgRegistryEntryValue {
 
-    # Determine if this is a test or production deployment
-    $RepoUrl = Set-URL
+    param(
+        [Parameter(Mandatory = $true)][string]$Title,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [AllowNull()][AllowEmptyString()][string]$Current
+    )
+
     Write-Log "==========================================================================================="
-    Write-Log "SCRIPT: $LocalFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START"
+    Write-Log $Title
     Write-Log "==========================================================================================="
+    Write-Log ""
+
+    $ValueToUse = $Current
+    $exit = "n"
+
+    While ($exit -eq "n"){
+
+        Write-Log "Your current organization $Label (read from this PC) is:"
+        if ([string]::IsNullOrEmpty($Current)) { Write-Log "(not set)" } else { Write-Log "$Current" }
+        Write-Log ""
+        # Write-Log "If this is acceptable, press Enter to continue or enter the new key now:" "WARNING"
+        Write-Log "Options:"
+        Write-Log " - Input a new value"
+        Write-Log " - Leave blank to keep existing"
+        Write-Log " - Type 'CLEAR' to remove existing value"
+        Write-Log ""
+        $TempValue = Read-Host "Enter your selection"
+        Write-Log ""
+
+        if ($TempValue -eq "") {
+            $ValueToUse = $Current
+            Write-Log "Using existing $($Label): $ValueToUse"
+        } elseif ($TempValue -eq "CLEAR") {
+            $ValueToUse = ""
+            Write-Log "Clearing $Label, setting to blank."
+        } else {
+            $ValueToUse = $TempValue
+            Write-Log "Using new $($Label): $ValueToUse"
+        }
+
+        Write-Log ""
+        Write-Log "Is this acceptable?" "WARNING"
+        $exit = Read-Host "(y/n)"
+        Write-Log ""
+    }
+
+    return $ValueToUse
+}
+
+# Collects the four organization values an admin enters by hand (the other three are the defaults in
+# Generate_Install-Command.ps1 -> OrgRegistryChangesString). -Target only changes the wording: the
+# values either go into Intune remediation scripts or straight into this PC's registry.
+Function Read-OrgRegistryEntryValues {
+
+    param(
+        [ValidateSet('Intune', 'Local')][string]$Target = 'Intune'
+    )
 
     Write-Log ""
-    Write-Log "Registry_Remediations_For_Org"
+    if ($Target -eq 'Local') {
+        Write-Log "The values you enter below will be written to THIS PC's registry only (HKLM\SOFTWARE\PowerDeploy)." "WARNING"
+    } else {
+        Write-Log "The values you enter below will be built into Intune remediation scripts that write them to every device you assign them to." "WARNING"
+    }
     Write-Log ""
 
     Write-Log "Do you need instructions on generating SAS keys for your Azure Blob Storage containers?" "WARNING"
@@ -3831,11 +3887,14 @@ Function Registry_Remediations--InTune-Setup{
     Write-Log ""
     if ($NeedInstructions -eq "y") {
 
+        $StorageAccountToShow = $StorageAccountName
+        if ([string]::IsNullOrWhiteSpace($StorageAccountToShow)) { $StorageAccountToShow = "(your PowerDeploy storage account)" }
+
         Write-Log "Instructions for navigating to your Azure Blob Storage container as follows:"
         Write-Log ""
         Write-Log " 1 - Go to https://portal.azure.com/#view/Microsoft_Azure_StorageHub/StorageHub.MenuView/~/StorageAccountsBrowse"
         Write-Log ""
-        Write-Log " 2 - Select this storage account: $StorageAccountName"
+        Write-Log " 2 - Select this storage account: $StorageAccountToShow"
         Write-Log ""
         Write-Log " 3 - Select 'Data Storage' > 'Containers' from the left menu"
         Write-Log ""
@@ -3866,149 +3925,29 @@ Function Registry_Remediations--InTune-Setup{
 
     # [hashtable]$HashTable = @{}
 
-    Write-Log "==========================================================================================="
-    Write-Log "GIT REPO URL"
-    Write-Log "==========================================================================================="
-    Write-Log ""
+    [hashtable]$Values = @{
+        CustomRepoURL              = Read-OrgRegistryEntryValue -Title "GIT REPO URL"              -Label "Git Repo URL"            -Current $CustomRepoURL
 
-    $OldCustomRepoURL = $CustomRepoURL
-    $exit = "n"
-
-    While ($exit -eq "n"){
-
-        $CustomRepoURL = $OldCustomRepoURL
-        Write-Log "Your current custom organization Git Repo URL is:"
-        Write-Log "$CustomRepoURL"
-        Write-Log ""
-        # Write-Log "If this is acceptable, press Enter to continue or enter the new key now:" "WARNING"
-        Write-Log "Options:"
-        Write-Log " - Input a new value"
-        Write-Log " - Leave blank to keep existing"
-        Write-Log " - Type 'CLEAR' to remove existing key"
-        Write-Log ""
-        $TempRepoURL = Read-Host "Enter your selection"
-        Write-Log ""
-
-        if ($TempRepoURL -eq "") {
-            $RepoURLtoUse = $CustomRepoURL
-
-            Write-Log "Using existing Repo URL: $RepoURLtoUse"
-        } elseif ($TempRepoURL -eq "CLEAR") {
-
-            $RepoURLtoUse = ""
-            Write-Log "Clearing Repo URL, setting to blank."
-        } else {
-
-            Write-Log "Using new Repo URL: $TempRepoURL"
-            $RepoURLtoUse = $TempRepoURL
-        }
-        Write-Log ""
-        Write-Log "Is this acceptable?" "WARNING"
-        $exit = Read-Host "(y/n)"
-
-
-        Write-Log ""
-    }
     # if ($RepoURLtoUse -ne "" -or $null -ne $RepoURLtoUse) {
 
     #     $HashTable.Add("CustomRepoURL", $RepoURLtoUse)
 
     # }
-    
 
-    Write-Log "==========================================================================================="
-    Write-Log "GIT REPO TOKEN"
-    Write-Log "==========================================================================================="
-    Write-Log ""
+        CustomRepoToken            = Read-OrgRegistryEntryValue -Title "GIT REPO TOKEN"            -Label "Git Repo Token"          -Current $CustomRepoToken
 
-    $OldCustomRepoToken = $CustomRepoToken
-    $exit = "n"
-    While ($exit -eq "n"){
-
-        $CustomRepoToken = $OldCustomRepoToken
-        Write-Log "Your current custom organization Git Repo Token is:"
-        Write-Log "$CustomRepoToken"
-        Write-Log ""
-        # Write-Log "If this is acceptable, press Enter to continue or enter the new key now:" "WARNING"
-        Write-Log "Options:"
-        Write-Log " - Input a new value"
-        Write-Log " - Leave blank to keep existing"
-        Write-Log " - Type 'CLEAR' to remove existing key"
-        Write-Log ""
-        $TempRepoToken = Read-Host "Enter your selection"
-        Write-Log ""
-        if ($TempRepoToken -eq "") {
-
-            $CustomRepoTokenToUse = $CustomRepoToken
-            Write-Log "Using existing Repo Token: $CustomRepoTokenToUse"
-        } elseif ($TempRepoToken -eq "CLEAR") {
-
-            $CustomRepoTokenToUse = ""
-            Write-Log "Clearing Repo Token, setting to blank."
-        } else {
-
-            Write-Log "Using new Repo Token: $TempRepoToken"
-            $CustomRepoTokenToUse = $TempRepoToken
-        } 
-
-        Write-Log ""
-        Write-Log "Is this acceptable?" "WARNING"
-        $exit = Read-Host "(y/n)"   
-
-        Write-Log ""
-
-    }
     # if ($CustomRepoTokenToUse -ne "" -or $null -ne $CustomRepoTokenToUse) {
 
     #     $HashTable.Add("CustomRepoToken", $CustomRepoTokenToUse)
     # }
-    
+
 
     # Write-Log "Enter your custom PRINTER share SAS key:" "WARNING"
 
     # $PrinterContainerSASkey = Read-Host "SAS KEY"
 
-    Write-Log "==========================================================================================="
-    Write-Log "PRINTER SHARE SAS KEY"
-    Write-Log "==========================================================================================="
+        PrinterContainerSASkey     = Read-OrgRegistryEntryValue -Title "PRINTER SHARE SAS KEY"     -Label "PRINTER share SAS key"   -Current $PrinterContainerSASkey
 
-    Write-Log ""
-
-    $OldPrinterContainerSASkey = $PrinterContainerSASkey
-    $exit = "n"
-    While ($exit -eq "n"){
-
-        $PrinterContainerSASkey = $OldPrinterContainerSASkey
-        Write-Log "Your current custom organization PRINTER share SAS key is:"
-        Write-Log "$PrinterContainerSASkey"
-        Write-Log ""
-        # Write-Log "If this is acceptable, press Enter to continue or enter the new key now:" "WARNING"
-        Write-Log "Options:"
-        Write-Log " - Input a new value"
-        Write-Log " - Leave blank to keep existing"
-        Write-Log " - Type 'CLEAR' to remove existing key"
-        Write-Log ""
-        $TempKey = Read-Host "Enter your selection"
-        Write-Log ""
-
-        if ($TempKey -eq "") {
-
-            $PrintSASKeytoUse = $PrinterContainerSASkey
-            Write-Log "Using existing Printer SAS key: $PrintSASKeytoUse"
-
-        } elseif ($TempKey -eq "CLEAR") {
-            $PrintSASKeytoUse = ""
-            Write-Log "Clearing Printer SAS key, setting to blank."
-        } else {
-            Write-Log "Using new Printer SAS key: $TempKey"
-            $PrintSASKeytoUse = $TempKey
-        }
-
-        Write-Log ""
-        Write-Log "Is this acceptable?" "WARNING"
-        $exit = Read-Host "(y/n)"
-
-    }
     # if ($PrintSASKeytoUse -ne "" -or $null -ne $PrintSASKeytoUse) {
 
     #     $HashTable.Add("PrinterContainerSASkey", $PrintSASKeytoUse)
@@ -4018,74 +3957,44 @@ Function Registry_Remediations--InTune-Setup{
     # Write-Log "Enter your custom APPLICATION share SAS key:" "WARNING"  
 
     # $ApplicationContainerSASkey = Read-Host "SAS KEY"
-    Write-Log "==========================================================================================="
-    Write-Log "APPLICATION SHARE SAS KEY"
-    Write-Log "==========================================================================================="
-    Write-Log ""  
 
-    $OldApplicationContainerSASkey = $ApplicationContainerSASkey
-    $exit = "n"
-    While ($exit -eq "n"){
+        ApplicationContainerSASkey = Read-OrgRegistryEntryValue -Title "APPLICATION SHARE SAS KEY" -Label "APP share SAS key"       -Current $ApplicationContainerSASkey
 
-        $ApplicationContainerSASkey = $OldApplicationContainerSASkey
-        Write-Log "Your current custom organization APP share SAS key is: "
-        Write-Log "$ApplicationContainerSASkey"
-        Write-Log ""
-        # Write-Log "If this is acceptable, press Enter to continue or enter the new key now:" "WARNING"
-        Write-Log "Options:"
-        Write-Log " - Input a new value"
-        Write-Log " - Leave blank to keep existing"
-        Write-Log " - Type 'CLEAR' to remove existing key"
-        Write-Log ""
-        $TempKey = Read-Host "Enter your selection"
-        Write-Log ""
-
-        if ($TempKey -eq "") {
-
-            $ApplicationSASKeytoUse = $ApplicationContainerSASkey
-            Write-Log "Using existing Application SAS key: $ApplicationSASKeytoUse"
-
-        } elseif ($TempKey -eq "CLEAR") {
-            $ApplicationSASKeytoUse = ""
-            Write-Log "Clearing Application SAS key, setting to blank."
-        } else {
-            Write-Log "Using new Application SAS key: $TempKey"
-            $ApplicationSASKeytoUse = $TempKey
-        } 
-
-        Write-Log ""
-        Write-Log "Is this acceptable?" "WARNING"
-        $exit = Read-Host "(y/n)"
-        Write-Log ""
-
-
-    }
-
-
-
-    
     # if ($ApplicationSASKeytoUse -ne "" -or $null -ne $ApplicationSASKeytoUse) {
 
     #     $HashTable.Add("ApplicationContainerSASkey", $ApplicationSASKeytoUse)
     # }
+    }
 
     Write-Log ""
 
+    return $Values
+}
+
+# DONE 1/14/26 - Thoroughly tested
+Function OrganizationRegistryEntries--InTune-Setup{
+
+    # Determine if this is a test or production deployment
+    $RepoUrl = Set-URL
+    Write-Log "==========================================================================================="
+    Write-Log "SCRIPT: $LocalFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START"
+    Write-Log "==========================================================================================="
+
+    Write-Log ""
+    Write-Log "ORGANIZATION REGISTRY ENTRIES - INTUNE SETUP"
     Write-Log ""
 
-    [hashtable]$FunctionParams = $HashTable
+    # NOTE: Not currently used - kept for the planned "only pass non-blank values" feature (see the commented
+    # $HashTable lines in Read-OrgRegistryEntryValues). $HashTable is never set today, so this would only assign
+    # $null before the real assignment below. When enabling it, have Read-OrgRegistryEntryValues return the
+    # filtered table (its $HashTable is local to that function), and keep this ABOVE the real assignment.
+    # [hashtable]$FunctionParams = $HashTable
 
-    
-        [hashtable]$FunctionParams = @{
-            PrinterContainerSASkey = $PrintSASKeytoUse
-            ApplicationContainerSASkey = $ApplicationSASKeytoUse
-            CustomRepoToken = $CustomRepoTokenToUse
-            CustomRepoURL = $RepoURLtoUse
-        }
+    [hashtable]$FunctionParams = Read-OrgRegistryEntryValues -Target 'Intune'
 
-        Write-Log "Attempting to generate the registry remediation scripts..."
-        Write-Log ""
-
+    Write-Log ""
+    Write-Log "Attempting to generate the registry remediation scripts..."
+    Write-Log ""
 
         [hashtable]$ReturnHash = @{}
 
@@ -4245,6 +4154,118 @@ Function Registry_Remediations--InTune-Setup{
     Write-Log "That's all! After deploying to endpoints give your target machines some time and monitor progress." "SUCCESS"
 
 
+
+}
+
+# Writes the organization registry values straight to THIS PC, for a machine that no PowerDeploy
+# registry remediation targets yet. Same prompts as OrganizationRegistryEntries--InTune-Setup, the same
+# value layout and defaults (Generate_Install-Command.ps1 -> OrgRegistryChangesString), and the same
+# write / lock down / read back script the Intune remediation runs on endpoints.
+Function OrganizationRegistryEntries--Local-Setup {
+
+    Write-Log "==========================================================================================="
+    Write-Log "SCRIPT: $LocalFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START"
+    Write-Log "==========================================================================================="
+    Write-Log ""
+    Write-Log "ORGANIZATION REGISTRY ENTRIES - LOCAL SETUP"
+    Write-Log ""
+    Write-Log "This function is used to set up the custom Organization Registry Entries manually."
+    Write-log "This is useful on a fresh PC or when no PowerDeploy registry remediation from Intune targets this PC yet." "INFO2"
+    Write-Log "In the future if an automated remediation does target this PC, the remediation's values will replace the local values you have set up manually." "INFO2"
+
+    [hashtable]$FunctionParams = Read-OrgRegistryEntryValues -Target 'Local'
+
+    Write-Log "Building the registry values..." "INFO2"
+    Write-Log ""
+
+    $RegistryChanges = [string](@(& $GenerateInstallCommand_ScriptPath `
+        -DesiredFunction "OrgRegistryChangesString" `
+        -TargetWorkingDirectory $WorkingDirectory `
+        -FunctionParams $FunctionParams) | Select-Object -Last 1)
+
+    $Entries = @([regex]::Matches($RegistryChanges, '-KeyPath "(?<k>(?:[^"]|"")*)" -ValueName "(?<n>(?:[^"]|"")*)" -ValueType "(?:[^"]|"")*" -Value "(?<v>(?:[^"]|"")*)"'))
+
+    if ($Entries.Count -eq 0) {
+        Write-Log "Could not build the registry values; nothing was written. See the Generator_Logs folder for details." "ERROR"
+        return
+    }
+
+    Write-Log ""
+    Write-Log "==========================================================================================="
+    Write-Log "REVIEW"
+    Write-Log "==========================================================================================="
+    Write-Log ""
+    Write-Log "These values will be written to this PC's registry:"
+    Write-Log ""
+    foreach ($Entry in $Entries) {
+        $ShownValue = $Entry.Groups['v'].Value -replace '""', '"'
+        if ([string]::IsNullOrEmpty($ShownValue)) { $ShownValue = "(blank)" }
+        Write-Log ("   {0}\{1} = {2}" -f $Entry.Groups['k'].Value, $Entry.Groups['n'].Value, $ShownValue) "INFO2"
+    }
+    Write-Log ""
+    Write-Log "StorageAccountName and the two JSON paths are the defaults in Other_Tools\Generate_Install-Command.ps1 (OrgRegistryChangesString)." "INFO2"
+    Write-Log ""
+
+    Write-Log "Write these values to this PC's registry now?" "WARNING"
+    $Answer = Read-Host "(y/n)"
+    While ($Answer -ne "y" -and $Answer -ne "n") {
+        Write-Log "Invalid choice. Please enter 'y' or 'n'." "ERROR"
+        $Answer = Read-Host "(y/n)"
+    }
+    Write-Log ""
+
+    if ($Answer -ne "y") {
+        Write-Log "Cancelled; nothing was written." "WARNING"
+        return
+    }
+
+    Write-Log "Writing the values, locking down the key, and reading them back..." "INFO2"
+    Write-Log ""
+
+    # Guarded like Git-Runner guards the same call: a terminating error inside the template must not
+    # escape into the menu, and a stale exit code from earlier must not read as success.
+    $global:LASTEXITCODE = 1
+    try {
+        & $General_RemediationScript_Registry_TEMPLATE `
+            -RegistryChanges $RegistryChanges `
+            -WorkingDirectory $WorkingDirectory `
+            -RepoNickName $ThisRepoNickName `
+            -function 'Remediate' `
+            -AlsoLockDown $True
+        $ExitCode = $global:LASTEXITCODE
+    } catch {
+        Write-Log "The registry write stopped with an error: $_" "ERROR"
+        $ExitCode = 1
+    }
+
+    Write-Log ""
+
+    if ($ExitCode -ne 0) {
+        Write-Log "The registry values could not all be written and confirmed (exit code $ExitCode). See the output above and the Detection_Logs folder." "ERROR"
+        return
+    }
+
+    # On endpoints, Git-Runner's Security_Manager.ps1 also locks the parent key (the template only
+    # locks keys it creates). Same call, so this PC ends up with the same ACLs as a managed endpoint.
+    $global:LASTEXITCODE = 1
+    try {
+        & "$RepoRoot\Configurators\Configure-Registry.ps1" -KeyOnly $true -KeyPath 'HKLM:\SOFTWARE\PowerDeploy' -Function "Lockdown" -WorkingDirectory $WorkingDirectory
+        $LockExitCode = $global:LASTEXITCODE
+    } catch {
+        Write-Log "Locking down HKLM\SOFTWARE\PowerDeploy stopped with an error: $_" "ERROR"
+        $LockExitCode = 1
+    }
+
+    Write-Log ""
+
+    if ($LockExitCode -ne 0) {
+        Write-Log "The values were written and confirmed, but HKLM\SOFTWARE\PowerDeploy could not be locked down to SYSTEM and Administrators (exit code $LockExitCode). See the Config_Logs folder." "ERROR"
+        return
+    }
+
+    Write-Log "All values were written to this PC's registry and confirmed." "SUCCESS"
+    Write-Log "Close and reopen Setup so it picks up the new values." "WARNING"
+    Write-Log ""
 
 }
 
@@ -5829,13 +5850,16 @@ Try{
 
     # Check the returned hashtable
     if(($ReturnHash -eq $null) -or ($ReturnHash.Count -eq 0)){
-        Write-Log "No data returned from Organization Registry Reader script!" "ERROR"
+
+        Clear 
+
+        Write-Log "No data returned from Organization Registry Entries reader script!" "ERROR"
         Write-Log ""
-        Write-Log "This is a serious error in a fully developed PowerDeploy environement."
-        Write-Log "However, if you are running this script for the first time from a download in a new environment, this may be expected if the registry values have not been set up yet."
+        Write-Log "If this is a new environment, this is expected." "WARNING"
+        Write-Log "However, this is a serious error in a fully developed PowerDeploy environment." "WARNING"
         Write-Log ""
         Write-Log "You can continue with setup with just public data from here if you wish." "WARNING"
-        Write-Log "If you want to exit now, press Ctrl+C to stop the script. Otherwise, press Enter to continue at your own risk." "WARNING"
+        Write-Log "If you want to exit now, press Ctrl+C to stop the script. Otherwise, press Enter to continue at your own risk." "INFO"
         Write-Log ""
 
         # Exit 1
