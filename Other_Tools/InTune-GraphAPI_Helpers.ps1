@@ -3824,7 +3824,7 @@ function Get-PDGraphProvisioningPrerequisite {
         return @{
             Available = $false
             Version   = $null
-            Message   = ('Uploading through the API does not need this, and guided publishing still works. Provisioning needs the Microsoft Graph PowerShell module, which is not installed here. Install it with: {0}' -f [string]$script:PDGraph.MgModuleInstallHint)
+            Message   = ('The administrator sign-in needs the Microsoft Graph PowerShell module ({0}), which is not installed for this Windows account. Install it with: {1}' -f [string]$script:PDGraph.MgModuleName, [string]$script:PDGraph.MgModuleInstallHint)
         }
     }
 

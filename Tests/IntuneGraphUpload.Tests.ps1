@@ -4060,7 +4060,7 @@ Add-TestCase 'M5-04' 'the administrator-channel prerequisite is reported, never 
     $missing = Get-PDGraphProvisioningPrerequisite -Probe { $null }
     Assert-True (-not $missing.Available) 'a machine without the module is reported as unavailable'
     Assert-Like '*Install-Module Microsoft.Graph.Authentication -Scope CurrentUser*' $missing.Message 'names the exact prerequisite'
-    Assert-Like '*guided publishing still works*' $missing.Message 'says guided publishing is unaffected'
+    Assert-Like '*not installed for this Windows account*' $missing.Message 'says what is missing, and for whom'
 
     $present = Get-PDGraphProvisioningPrerequisite -Probe { '2.36.0' }
     Assert-True $present.Available 'an installed module is reported as available'

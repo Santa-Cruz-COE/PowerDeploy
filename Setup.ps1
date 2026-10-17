@@ -4411,6 +4411,73 @@ Function Read-GraphUploadSecretLifetime {
     }
 }
 
+Function Confirm-GraphUploadAdminModule {
+
+    param([string]$Purpose = 'automatic API setup')
+
+    # The administrator sign-in needs Microsoft.Graph.Authentication. The library only reports it
+    # missing (it must never install anything as a side effect of loading - spec 7.1), so the offer
+    # to install it lives here, behind an explicit yes. Returns $true when the module is usable.
+    $Prerequisite = Get-PDGraphProvisioningPrerequisite
+
+    if ($Prerequisite.Available) { return $true }
+
+    Write-Log "The administrator sign-in function (which is required for $Purpose) needs the Microsoft Graph PowerShell module ($([string]$PDGraph.MgModuleName)), which is not installed for this Windows account." 'WARNING'
+    Write-Log ""
+    Write-Log "Installation can take place automatically right now, or you can manually install with this command: $([string]$PDGraph.MgModuleInstallHint)"
+    Write-Log ""
+
+    $Install = Read-GraphUploadYesNo -Question "Would you like this script to automatically install the Microsoft Graph PowerShell module right now?" -Default $true
+
+    if (-not $Install) {
+        Write-Log "Not installed; nothing was changed. Uploads, the Manual setup choice and guided publishing work without it." 'WARNING'
+        return $false
+    }
+
+    Write-Log ""
+    Write-Log "Installing $([string]$PDGraph.MgModuleName) for this Windows account. This can take a minute..." 'INFO2'
+
+    try {
+
+        # Older .NET defaults can refuse the Gallery's TLS 1.2. Only this process is affected.
+        $Protocol = [Net.ServicePointManager]::SecurityProtocol
+        if ($Protocol -ne [Net.SecurityProtocolType]::SystemDefault -and -not ($Protocol -band [Net.SecurityProtocolType]::Tls12)) {
+            [Net.ServicePointManager]::SecurityProtocol = $Protocol -bor [Net.SecurityProtocolType]::Tls12
+        }
+
+        # Stock Windows PowerShell 5.1 has no NuGet provider, and Install-Module would otherwise stop
+        # to ask for it. -Force on both calls also skips the "untrusted repository" prompt for this
+        # one install, without marking PSGallery as trusted.
+        $NuGet = Get-PackageProvider -ListAvailable -Name 'NuGet' -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Version -ge [version]'2.8.5.201' } | Select-Object -First 1
+        if ($null -eq $NuGet) {
+            Write-Log "     Installing the NuGet package provider (needed by Install-Module)..." 'INFO2'
+            Install-PackageProvider -Name 'NuGet' -MinimumVersion '2.8.5.201' -Scope CurrentUser -Force -ErrorAction Stop | Out-Null
+        }
+
+        Install-Module -Name ([string]$PDGraph.MgModuleName) -Repository 'PSGallery' -Scope CurrentUser -Force -ErrorAction Stop
+
+    } Catch {
+
+        Write-Log "The install did not complete:" 'ERROR'
+        Show-GraphUploadError $_
+        Write-Log "You can retry, or install it yourself with: $([string]$PDGraph.MgModuleInstallHint)" 'WARNING'
+        return $false
+
+    }
+
+    $Prerequisite = Get-PDGraphProvisioningPrerequisite
+
+    if (-not $Prerequisite.Available) {
+        Write-Log "The install reported no error, but the module still cannot be found. Close and reopen Setup, then try again." 'ERROR'
+        return $false
+    }
+
+    Write-Log "Installed $([string]$PDGraph.MgModuleName) $($Prerequisite.Version)." 'SUCCESS'
+    Write-Log ""
+    return $true
+}
+
 Function Connect-GraphUploadAdminSession {
 
     param(
@@ -4421,12 +4488,7 @@ Function Connect-GraphUploadAdminSession {
     # The upload identity is never allowed to manage applications (spec 7.1), so anything here that
     # touches Entra is done by a temporary sign-in as an administrator. This function owns the
     # prompts; the library owns the connection and its verification.
-    $Prerequisite = Get-PDGraphProvisioningPrerequisite
-
-    if (-not $Prerequisite.Available) {
-        Write-Log $Prerequisite.Message 'WARNING'
-        return $null
-    }
+    if (-not (Confirm-GraphUploadAdminModule)) { return $null }
 
     $TenantId = Read-GraphUploadTenantId
     if ($null -eq $TenantId) {
@@ -4541,14 +4603,7 @@ Function Invoke-GraphUploadProvisionApplication {
     Write-Log "-------------------------------------------------------------------------------------------"
     Write-Log ""
 
-    $Prerequisite = Get-PDGraphProvisioningPrerequisite
-
-    if (-not $Prerequisite.Available) {
-        Write-Log $Prerequisite.Message 'WARNING'
-        Write-Log ""
-        Write-Log "The Manual choice under Azure App Registration - Setup/Config works without it, and guided manual publishing is always available." 'WARNING'
-        return
-    }
+    if (-not (Confirm-GraphUploadAdminModule)) { return }
 
     $LifetimeDays = Read-GraphUploadSecretLifetime -Default ([int]$PDGraph.DefaultSecretLifetimeDays)
 
@@ -4848,12 +4903,7 @@ Function Invoke-GraphUploadRotateSecret {
     Write-Log "-------------------------------------------------------------------------------------------"
     Write-Log ""
 
-    $Prerequisite = Get-PDGraphProvisioningPrerequisite
-
-    if (-not $Prerequisite.Available) {
-        Write-Log $Prerequisite.Message 'WARNING'
-        return
-    }
+    if (-not (Confirm-GraphUploadAdminModule -Purpose "rotating this PC's secret")) { return }
 
     $Summary = Show-GraphUploadCredentialState
 
@@ -4962,6 +5012,8 @@ Function Invoke-GraphUploadRemoveCredential {
     $Session = $null
 
     if ($Revoke) {
+
+        if (-not (Confirm-GraphUploadAdminModule -Purpose "revoking this PC's secret in Entra")) { return }
 
         $Session = Connect-GraphUploadAdminSession -Purpose "remove this PC's secret from the Azure App Registration"
         if ($null -eq $Session) { return }
