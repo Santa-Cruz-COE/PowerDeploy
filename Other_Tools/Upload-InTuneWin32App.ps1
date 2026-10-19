@@ -1017,8 +1017,10 @@ function Invoke-PDIntuneUploadWriteStages {
             }
             Write-PDUploadLog -Message ("The content file storage URI needs renewing {0}." -f $reason) -Level 'WARNING'
 
+            # No request body: Microsoft documents renewUpload as "Do not supply a request body",
+            # and the service rejects the body that used to be sent (see RenewUploadBody).
             $null = Invoke-PDGraphRequest -Method Post -Uri ($fileUri + '/' + [string]$script:PDGraph.RenewUploadAction) `
-                                         -Body ([hashtable]$script:PDGraph.RenewUploadBody) -AuthContext $auth -RetryMode 'Write' `
+                                         -AuthContext $auth -RetryMode 'Write' `
                                          -Stage 'Upload' -Description 'renew the content file storage URI'
 
             $renewed = Wait-PDGraphCondition -Description 'the renewed storage URI to become available' -Stage 'Upload' -Test {

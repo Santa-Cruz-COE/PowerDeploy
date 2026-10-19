@@ -3003,6 +3003,10 @@ Add-TestCase 'U03a' 'An expired storage URI is renewed before anything is upload
     Assert-Equal $true $result.Success ('the publish finished after renewing the URI; message: ' + $result.Message)
     Assert-Equal 1 ([int]$script:M4.RenewCount) 'exactly one renewal was needed'
     Assert-Equal 1 @(@($script:MockGraphCalls) | Where-Object { (($_.Method -eq 'Post') -and ($_.Uri -like '*microsoft.graph.renewUpload')) }).Count 'the renewUpload action was called once'
+    # Microsoft: "Do not supply a request body for this method." The live service refused the body
+    # this used to send (HTTP 400, unexpected 'odata.type' annotation; 2026-10-19).
+    $renewCall = @(@($script:MockGraphCalls) | Where-Object { (($_.Method -eq 'Post') -and ($_.Uri -like '*microsoft.graph.renewUpload')) })[0]
+    Assert-True (($null -eq $renewCall.BodyBytes) -or (@($renewCall.BodyBytes).Count -eq 0)) 'renewUpload is posted with no request body'
 
     $blockRequests = @(@($script:M4.StorageRequests) | Where-Object { ([string]$_.Uri) -like '*comp=block&*' })
     Assert-True $blockRequests.Count -ge 1 'blocks were uploaded'

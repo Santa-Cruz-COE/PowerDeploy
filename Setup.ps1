@@ -1577,6 +1577,8 @@ Function Printer--InTune-BulkCreate {
             if ($Result.Result -eq 'Failed') { $Level = 'ERROR' } elseif ($Result.Result -eq 'CreatedOldNotDeleted') { $Level = 'WARNING' }
             $Detail = ''
             if ($Result.NewAppId) { $Detail = " (new app $($Result.NewAppId)" + $(if ($Result.DeletedAppIds) { ", replaced $($Result.DeletedAppIds))" } else { ')' }) }
+            if ([int]("0" + $Result.Attempts) -gt 1) { $Detail += " [attempt $($Result.Attempts)]" }
+            if ($Result.Result -ne 'Created' -and $Result.Result -ne 'Overridden' -and $Result.Error) { $Detail += ": $($Result.Error)" }
             Write-Log ("[{0}/{1}] {2} ... {3}{4}" -f $Index, $Total, $Result.IntuneDisplayName, $Result.Result, $Detail) $Level
         } `
         -Log { param($Message, $Level) Write-Log $Message $Level -LogOnly })

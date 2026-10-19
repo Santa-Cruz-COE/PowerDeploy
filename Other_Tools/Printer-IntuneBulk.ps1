@@ -43,7 +43,7 @@ $script:PDBulk = @{
     # installer will use (the PresetDriver's values when one is set).
     ReferenceColumns = @('Department', 'Location', 'Model', 'Asset', 'PrinterIP', 'PortName', 'PresetDriver', 'DriverName', 'INFFile', 'DriverZip', 'Verified', 'Publisher')
     StagedColumns  = @('Include', 'PrinterName', 'IntuneDisplayName', 'RequiredGroups', 'AvailableGroups', 'Department', 'Location', 'PrinterIP', 'Problem', 'Action', 'ExistingAppIds', 'ExistingDisplayNames')
-    ResultColumns  = @('Include', 'PrinterName', 'IntuneDisplayName', 'RequiredGroups', 'AvailableGroups', 'Department', 'Location', 'PrinterIP', 'Problem', 'Action', 'Result', 'NewAppId', 'DeletedAppIds', 'BackupFiles', 'Error')
+    ResultColumns  = @('Include', 'PrinterName', 'IntuneDisplayName', 'RequiredGroups', 'AvailableGroups', 'Department', 'Location', 'PrinterIP', 'Problem', 'Action', 'Result', 'Attempts', 'NewAppId', 'DeletedAppIds', 'BackupFiles', 'Error')
 
     # Bulk delete. Only Delete is the operator's; rows are matched by AppId alone.
     DeleteColumns       = @('Delete', 'DisplayName', 'PrinterName', 'DeployMode', 'Version', 'Created', 'AppId')
@@ -777,20 +777,50 @@ function Invoke-PDPrinterBulkCreate {
         $meta = $build.Metadata
         $result['IntuneDisplayName'] = [string]$meta.DisplayName
 
+        # Intune's content upload fails now and then for no reason of ours (seen 2026-10-19: about 1 in
+        # 3 back-to-back printers failed between "create app" and "commit content", and the same
+        # printers passed a dry run). A failed attempt is retried after a pause, but ONLY when the
+        # uploader confirms nothing was left behind (CleanupStatus Deleted/NotNeeded) and the failure
+        # was not in preflight (a bad group or file fails the same way every time).
+        $maxAttempts = 3
+        if ($Context.ContainsKey('UploadAttempts')) { $maxAttempts = [math]::Max(1, [int]$Context.UploadAttempts) }
+        $retryDelay = 20
+        if ($Context.ContainsKey('RetryDelaySeconds')) { $retryDelay = [math]::Max(0, [int]$Context.RetryDelaySeconds) }
+
         $upload = $null
-        try {
-            $upload = Invoke-PDIntuneUpload -IntuneWinPath ([string]$meta.IntuneWinPath) -DisplayName ([string]$meta.DisplayName) `
-                -Description ([string]$meta.Description) -Publisher ([string]$meta.Publisher) `
-                -InstallCommandFile ([string]$meta.InstallCommandFile) -UninstallCommandFile ([string]$meta.UninstallCommandFile) `
-                -DetectionScriptFile ([string]$meta.DetectionScriptFile) -AppVersion ([string]$meta.AppVersion) `
-                -Category ([string]$meta.Category) -Notes ([string]$meta.Notes) `
-                -AllowAvailableUninstall ([bool]$meta.AllowAvailableUninstall) -IconFile ([string]$meta.IconFile) `
-                -RequiredGroups ([string[]]@($row.RequiredIds)) -AvailableGroups ([string[]]@($row.AvailableIds)) `
-                -CredentialPath ([string]$Context.CredentialPath) `
-                -AllowDuplicateName:([string]$row.Action -eq 'Override')
-        } catch {
-            $upload = [pscustomobject]@{ Success = $false; Stage = 'Upload'; Message = $_.Exception.Message; CleanupStatus = 'Unknown'; AppId = $null }
+        $attempt = 0
+        $allowDuplicate = ([string]$row.Action -eq 'Override')
+        $earlierFailures = @()
+        while ($true) {
+            $attempt++
+            try {
+                $upload = Invoke-PDIntuneUpload -IntuneWinPath ([string]$meta.IntuneWinPath) -DisplayName ([string]$meta.DisplayName) `
+                    -Description ([string]$meta.Description) -Publisher ([string]$meta.Publisher) `
+                    -InstallCommandFile ([string]$meta.InstallCommandFile) -UninstallCommandFile ([string]$meta.UninstallCommandFile) `
+                    -DetectionScriptFile ([string]$meta.DetectionScriptFile) -AppVersion ([string]$meta.AppVersion) `
+                    -Category ([string]$meta.Category) -Notes ([string]$meta.Notes) `
+                    -AllowAvailableUninstall ([bool]$meta.AllowAvailableUninstall) -IconFile ([string]$meta.IconFile) `
+                    -RequiredGroups ([string[]]@($row.RequiredIds)) -AvailableGroups ([string[]]@($row.AvailableIds)) `
+                    -CredentialPath ([string]$Context.CredentialPath) `
+                    -AllowDuplicateName:$allowDuplicate
+            } catch {
+                $upload = [pscustomobject]@{ Success = $false; Stage = 'Upload'; Message = $_.Exception.Message; CleanupStatus = 'Unknown'; AppId = $null }
+            }
+
+            if ($null -ne $upload -and $upload.Success) { break }
+            if ($null -eq $upload -or $attempt -ge $maxAttempts) { break }
+
+            $cleanup = [string]$upload.CleanupStatus
+            if (($cleanup -ne 'Deleted' -and $cleanup -ne 'NotNeeded') -or ([string]$upload.Stage -eq 'Preflight')) { break }
+
+            $earlierFailures += ('attempt {0}: stage {1}: {2}' -f $attempt, $upload.Stage, $upload.Message)
+            if ($null -ne $Log) { $null = & $Log ("{0}: attempt {1} failed at stage {2} ({3}); nothing was left in Intune, retrying in {4}s." -f $meta.DisplayName, $attempt, $upload.Stage, $upload.Message, ($retryDelay * $attempt)) 'WARNING' }
+            # The incomplete app from that attempt was deleted, so its name may still be listed for a
+            # moment; it must not block the retry as a "duplicate".
+            if ($cleanup -eq 'Deleted') { $allowDuplicate = $true }
+            if ($retryDelay -gt 0) { Start-Sleep -Seconds ($retryDelay * $attempt) }
         }
+        $result['Attempts'] = [string]$attempt
 
         if ($null -eq $upload -or -not $upload.Success) {
             $message = '(the uploader returned nothing; check Intune for this printer before retrying)'
@@ -802,6 +832,7 @@ function Invoke-PDPrinterBulkCreate {
                 }
             }
             if ([string]$row.Action -eq 'Override') { $message += ' The existing app was not touched.' }
+            if ($attempt -gt 1) { $message = ('{0} attempts failed. Last: {1}' -f $attempt, $message) }
             $result['Result'] = 'Failed'
             $result['Error']  = $message
             $results += [pscustomobject]$result
@@ -812,6 +843,7 @@ function Invoke-PDPrinterBulkCreate {
         $result['NewAppId'] = [string]$upload.AppId
         $result['Result']   = 'Created'
         $result['Include']  = 'N'
+        if ($earlierFailures.Count -gt 0) { $result['Error'] = ('Succeeded on attempt {0} after: {1}' -f $attempt, ($earlierFailures -join ' | ')) }
 
         if ([string]$row.Action -eq 'Override') {
             $deleted = @(); $backups = @(); $problems = @()

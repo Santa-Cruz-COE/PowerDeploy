@@ -635,7 +635,7 @@ Add-TestCase 'B60' 'override deletes the old app only after the new one exists, 
             (New-CreateRow -Name 'Alpha-Lobby' -Action 'Override' -OldIds @('old-alpha')),
             (New-CreateRow -Name 'Zulu-Copier' -Action 'Override' -OldIds @('old-zulu'))
         )
-        $results = @(Invoke-PDPrinterBulkCreate -StagedRows $rows -Catalog $catalog -AuthContext $script:FakeAuth -Context @{ BackupFolder = $backups; IntuneWinPath = 'x.intunewin' })
+        $results = @(Invoke-PDPrinterBulkCreate -StagedRows $rows -Catalog $catalog -AuthContext $script:FakeAuth -Context @{ BackupFolder = $backups; IntuneWinPath = 'x.intunewin'; RetryDelaySeconds = 0 })
 
         $alpha = $results | Where-Object { $_.PrinterName -eq 'Alpha-Lobby' }
         Assert-Equal 'Overridden' $alpha.Result 'the override completed'
@@ -680,7 +680,7 @@ Add-TestCase 'B61' 'one printer failing never stops the batch; skips and creates
             (New-CreateRow -Name 'Zulu-Copier' -Action 'Create')
         )
         $results = @(Invoke-PDPrinterBulkCreate -StagedRows $rows -Catalog $catalog -AuthContext $script:FakeAuth `
-                        -Context @{ BackupFolder = (Join-Path $script:TempRoot 'b61'); IntuneWinPath = 'x.intunewin' } `
+                        -Context @{ BackupFolder = (Join-Path $script:TempRoot 'b61'); IntuneWinPath = 'x.intunewin'; RetryDelaySeconds = 0 } `
                         -OnProgress { param($Index, $Total, $Row, $Result) $script:B61Progress += ('{0}/{1} {2}' -f $Index, $Total, $Result.Result) })
 
         Assert-Equal 4 $results.Count 'one result per staged row'
@@ -710,10 +710,59 @@ Add-TestCase 'B62' 'an old app whose backup cannot be read is never deleted' {
         $script:UploadPlan = @{}
         Set-AppStoreMock -Behaviour @{ 'old-alpha' = 'read-fails' }
         $results = @(Invoke-PDPrinterBulkCreate -StagedRows @(New-CreateRow -Name 'Alpha-Lobby' -Action 'Override' -OldIds @('old-alpha')) `
-                        -Catalog $catalog -AuthContext $script:FakeAuth -Context @{ BackupFolder = (Join-Path $script:TempRoot 'b62'); IntuneWinPath = 'x' })
+                        -Catalog $catalog -AuthContext $script:FakeAuth -Context @{ BackupFolder = (Join-Path $script:TempRoot 'b62'); IntuneWinPath = 'x'; RetryDelaySeconds = 0 })
         Assert-Equal 'CreatedOldNotDeleted' $results[0].Result 'reported as needing attention'
         Assert-Like '*Backup failed, so the app was NOT deleted*' $results[0].Error 'and why'
         Assert-Equal 0 @(Get-MockCalls -Method Delete).Count 'no DELETE without a backup'
+    } finally {
+        Remove-BulkCreateStubs
+    }
+}
+
+Add-TestCase 'B64' 'a failed upload that left nothing behind is retried; preflight failures and leftovers are not' {
+    $catalog = Get-PDPrinterJsonCatalog -Path (New-TestJsonFile -Json $script:GoodJson)
+    Install-BulkCreateStubs
+    try {
+        # Per display name: a list of outcomes, one per attempt (the last repeats).
+        $script:AttemptPlan = @{
+            'PRINTER: Alpha-Lobby' = @('content', 'ok')
+            'PRINTER: Zulu-Copier' = @('preflight')
+            'PRINTER: Delta-NoIP'  = @('leftover')
+            'PRINTER: Bravo-Old'   = @('content')
+        }
+        $script:AttemptCount = @{}
+        Set-Item -Path function:global:Invoke-PDIntuneUpload -Value {
+            param($IntuneWinPath, $DisplayName, $Description, $Publisher, $InstallCommandFile, $UninstallCommandFile, $DetectionScriptFile,
+                  $AppVersion, $Category, $Notes, [string[]]$RequiredGroups, [string[]]$AvailableGroups, $AllowAvailableUninstall,
+                  $CredentialPath, [switch]$DryRun, [switch]$AllowDuplicateName, [switch]$NoRollback, $TempDirectory, $IconFile, $InformationUrl, $PrivacyUrl)
+            $n = 1 + [int]$script:AttemptCount[$DisplayName]; $script:AttemptCount[$DisplayName] = $n
+            $script:Uploads += [pscustomobject]@{ DisplayName = $DisplayName; AllowDuplicateName = [bool]$AllowDuplicateName; Attempt = $n }
+            $plan = @($script:AttemptPlan[$DisplayName]); $outcome = $plan[[math]::Min($n, $plan.Count) - 1]
+            switch ($outcome) {
+                'ok'        { return [pscustomobject]@{ Success = $true;  Stage = 'Done';          Message = 'ok';    CleanupStatus = 'NotNeeded'; AppId = 'new-' + $n } }
+                'content'   { return [pscustomobject]@{ Success = $false; Stage = 'CommitFile';    Message = 'commitFileFailed'; CleanupStatus = 'Deleted'; AppId = 'tmp' } }
+                'preflight' { return [pscustomobject]@{ Success = $false; Stage = 'Preflight';     Message = 'bad group'; CleanupStatus = 'NotNeeded'; AppId = $null } }
+                'leftover'  { return [pscustomobject]@{ Success = $false; Stage = 'ContentUpload'; Message = 'boom';  CleanupStatus = 'Failed'; AppId = 'left-1' } }
+            }
+        }
+
+        $rows = @((New-CreateRow -Name 'Alpha-Lobby' -Action 'Create'), (New-CreateRow -Name 'Zulu-Copier' -Action 'Create'),
+                  (New-CreateRow -Name 'Delta-NoIP' -Action 'Create'), (New-CreateRow -Name 'Bravo-Old' -Action 'Create'))
+        $results = @(Invoke-PDPrinterBulkCreate -StagedRows $rows -Catalog $catalog -AuthContext $script:FakeAuth `
+                        -Context @{ BackupFolder = (Join-Path $script:TempRoot 'b64'); IntuneWinPath = 'x'; RetryDelaySeconds = 0 })
+        $by = @{}; foreach ($r in $results) { $by[$r.PrinterName] = $r }
+
+        Assert-Equal 'Created' $by['Alpha-Lobby'].Result 'a transient content failure is retried and succeeds'
+        Assert-Equal '2' $by['Alpha-Lobby'].Attempts 'on the second attempt'
+        Assert-Like '*Succeeded on attempt 2 after: attempt 1: stage CommitFile: commitFileFailed*' $by['Alpha-Lobby'].Error 'the earlier failure is kept for the record'
+        Assert-Equal 'False,True' ((@($script:Uploads | Where-Object { $_.DisplayName -eq 'PRINTER: Alpha-Lobby' }) | ForEach-Object { $_.AllowDuplicateName }) -join ',') 'only the retry may share the deleted attempt''s name'
+
+        Assert-Equal '1' $by['Zulu-Copier'].Attempts 'a preflight failure is not retried'
+        Assert-Equal '1' $by['Delta-NoIP'].Attempts 'a failure that may have left an app is never retried'
+        Assert-Like '*incomplete app was left in Intune: left-1*' $by['Delta-NoIP'].Error 'and the leftover is reported'
+        Assert-Equal '3' $by['Bravo-Old'].Attempts 'a printer that keeps failing stops after three attempts'
+        Assert-Like '3 attempts failed. Last: stage CommitFile*' $by['Bravo-Old'].Error 'and says so'
+        Assert-Equal 'Y' $by['Bravo-Old'].Include 'and stays marked for the next retry run'
     } finally {
         Remove-BulkCreateStubs
     }

@@ -88,6 +88,11 @@ if (-not $script:PDGraph) {
         CommitActionName  = 'microsoft.graph.commit'
         RenewUploadAction = 'microsoft.graph.renewUpload'
         RenewUploadBody   = @{
+            # NOT SENT (2026-10-19). Microsoft documents renewUpload as "Do not supply a request
+            # body", and the live service refuses this one with HTTP 400 ModelValidationFailure
+            # ("The annotation 'odata.type' was found ... not expected"): 30 of 70 printers in the
+            # first bulk run failed on it. The uploader now posts the action with no body; this
+            # definition is kept only as the record of what was tried.
             # The body for the renewUpload action. 'fileForceRenewedContentVersionStorage'
             # must be $true here: this code renews because the previous SAS expired, possibly
             # after blocks were already written, and a fresh container is the only target those
