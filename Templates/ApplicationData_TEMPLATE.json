@@ -119,6 +119,13 @@
     "WinGetID": "Spotify.Spotify"
   },
   {
+    "ApplicationName": "LibreOffice",
+    "InstallMethod": "WinGet",
+    "WinGetID": "TheDocumentFoundation.LibreOffice",
+    "AppDescription": "Free, open source office suite: Writer, Calc, Impress and Draw. Setup's bulk printer tools offer it for editing their CSV sheets on PCs without a spreadsheet program.",
+    "Publisher": "The Document Foundation"
+  },
+  {
     "ApplicationName": "MSI-Private-AzureBlob_Example",
     "InstallMethod": "MSI-Private-AzureBlob",
     "MSIPathFromContainerRoot": "zz/zz/install.msi",

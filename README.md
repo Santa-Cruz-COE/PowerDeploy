@@ -54,6 +54,7 @@ Built for teams that have gone cloud-first and hit the walls — apps that fail 
   - [Printer manifest format](#printer-manifest-format)
 - [Packaging and managing your assets](#packaging-and-managing-your-assets)
   - [Publishing to Intune automatically (optional)](#publishing-to-intune-automatically-optional)
+  - [Bulk printer tools (optional)](#bulk-printer-tools-optional)
 - [What you can do with it](#what-you-can-do-with-it)
 - [How it works (under the hood)](#how-it-works-under-the-hood)
   - [The runner pattern](#the-runner-pattern)
@@ -190,6 +191,26 @@ Instead of copying the wizard's output into the Intune portal by hand, Setup can
 4. If anything fails, Setup deletes the half-created app; if it can't, it shows the leftover app's ID so you can remove it. Either way you continue with the guided walkthrough — Setup never exits on a failure.
 
 **What goes where:** the **Description** (shown to users in the Company Portal) is, for printers, `Department`, `Location`, `Model`, `Asset` and `PrinterIP` (`N/A` for any that are blank); for apps, the catalog's `AppDescription`, or — for WinGet apps without one — the description from `winget show` (Microsoft Store first, then the WinGet community source), else `N/A`. Printers also get the standard icon [`Templates/Printer-Icon.png`](Templates/Printer-Icon.png) (replace that file to use your own); apps can name one with `IconFile` (a PNG/JPEG in the repo) or `IconUrl` (an `https` link, downloaded at publish time). The Company Portal **information and privacy links** come from the catalog's `InformationUrl` / `PrivacyUrl`, or — for WinGet apps — from `winget show` (`Homepage`, else `Publisher Url`; `Privacy Url`). Icons and links are set in a separate best-effort step, so a problem with them is a warning, never a failed upload. The **Publisher** is the catalog's `Publisher`, else (WinGet apps) the publisher `winget show` reports, else `PowerDeploy`. The **Version** is the catalog's `PackagedVersion` or `Version`, else the PowerDeploy source commit (printers always use the commit) — never WinGet's version number, since WinGet installs the latest release on each device. The **Notes** (admin-only) hold the technical block: target and source repo/branch, source commit, `Verified`, install method, versions and prerequisites for apps, and a `Created:` timestamp. Repository URLs are shown without any embedded credentials.
+
+### Bulk printer tools (optional)
+
+With the upload credential set up, two Setup entries handle many printers at once through a CSV you edit (usually in Excel). Nothing changes in Intune until you confirm a summary.
+
+**`Printer--InTune-BulkCreate`** — publish printers from `PrinterData.json`:
+
+1. Pick the deployment mode.
+2. Choose how to start: **1** - a fresh spreadsheet export from `PrinterData.json` in Azure Blob (normal), **2** - the same from a `PrinterData.json` file on this PC, or **3** - a pre-existing sheet, to resume an earlier run. Option 3 lists your recent runs (a run's `results.csv` has only its unfinished printers ticked) and still downloads the current `PrinterData.json`, because the sheet holds only your choices while printer details always come from the JSON. If the download fails, Setup offers a local file instead.
+3. For a fresh export, optionally enter default Required/Available groups to pre-fill every row (leave both blank to skip), and choose whether every printer starts ticked or none do (easier for picking a few). The sheet shows every `PrinterData.json` field (department, location, model, asset, IP, port, driver, verified, and any others) for reference. Printer details always come from the JSON itself, and the summary warns if any of those cells were edited.
+4. Edit `draft.csv`. It opens in your spreadsheet program. **If this PC has none** (common on admin VMs without Office), Setup offers to install **LibreOffice** (free and open source, about 360 MB; only after you answer yes) from the public app catalog, like any other PowerDeploy app, and opens the sheet in Calc with no import dialog and every column kept as text. When saving, choose **Use Text CSV Format!**. If you decline, a basic built-in editor window is used instead, and Notepad as a last resort. Set `Include` to `N` (or delete the row) for printers you don't want, and adjust `RequiredGroups` / `AvailableGroups` (`;`-separated, same rules as the wizard). Other columns are for reference; don't change `PrinterName`. Printers that would fail to install start at `Include = N` with the reason in `Problem`.
+5. Save the sheet and press Enter (in the built-in editor: **Save and continue**). Setup checks every group and every row, and lists **all** problems at once for you to fix; the built-in editor shows them above the grid when it reopens. It also finds printers that already exist in Intune **in the same deployment mode**; apps in other modes are never touched.
+6. For existing printers choose **Override all**, **Skip all**, or **Decide each**. Override creates the new app first and only then backs up and deletes the old one, so the printer is never missing from Intune. The old app's install history is lost.
+7. Type `yes` at the summary. Each printer is created with the same package, commands, description and notes as `Printer--InTune-Setup`. One failure doesn't stop the rest.
+
+`results.csv` lists every printer's outcome. To retry the failures, run it again and choose **Use a pre-existing sheet**; that run is at the top of the list.
+
+**`Printer--InTune-BulkDelete`** — clean up Intune: lists every PowerDeploy printer app (all modes) in `delete.csv` (same editor rules as above). Put `Y` in `Delete` (or tick it) for the ones to remove, save, and type the count to confirm. Each app is backed up (settings and assignments) to a JSON file before it is deleted. **Devices keep printers they already have.**
+
+Files go to `TEMP\PrinterBulk\` in the PowerDeploy working directory. Renaming printers isn't supported yet: a renamed printer is created as a new one, and the old queue stays on devices.
 
 ---
 
@@ -332,6 +353,7 @@ The same deployment serves two execution paths from one definition:
   - `OrganizationRegistryEntries--InTune-Setup` — generates the detection/remediation scripts that push org configuration to the registry, and can optionally also build a `.intunewin` of the remediation script.
   - `OrganizationRegistryEntries--Local-Setup` — asks the same questions as `OrganizationRegistryEntries--InTune-Setup` (no deployment mode), then writes the org configuration straight to this PC's `HKLM\SOFTWARE\PowerDeploy`, locks the key down, and reads the values back. For setting up a machine by hand when no registry remediation targets it.
   - `Printer--Convert-Vendor-DriverPack` — turns a manufacturer's driver pack into a PowerDeploy driver zip (see [Migrating from a print server](#migrating-from-a-print-server)).
+  - `Printer--InTune-BulkCreate` / `Printer--InTune-BulkDelete` — create many printers in Intune from `PrinterData.json`, or delete many printer apps, through one CSV (see [Bulk printer tools](#bulk-printer-tools-optional)).
   - `Printer--InTune-Setup` — packages a printer from `PrinterData.json` for Intune, then walks you through creating it or creates it automatically.
   - `Printer--Install-Local` / `Printer--Uninstall-Local` — installs or removes a printer on this machine.
   - `WindowsApp--InTune-Setup` — packages an app from the catalog for Intune (not `Custom_Script` apps yet), then walks you through creating it or creates it automatically.
@@ -340,6 +362,7 @@ The same deployment serves two execution paths from one definition:
 - [`Generate_Install-Command.ps1`](Other_Tools/Generate_Install-Command.ps1) — builds the Base64-encoded Intune install/uninstall commands and detection scripts.
 - [`Security_Manager.ps1`](Other_Tools/Security_Manager.ps1) — enforces strict ACLs on PowerDeploy folders and registry.
 - [`Upload-InTuneWin32App.ps1`](Other_Tools/Upload-InTuneWin32App.ps1), [`InTune-GraphAPI_Helpers.ps1`](Other_Tools/InTune-GraphAPI_Helpers.ps1), [`Get-WinGetAppDescription.ps1`](Other_Tools/Get-WinGetAppDescription.ps1) — the optional Intune upload: uploader, Graph/credential library, and the WinGet description lookup (`winget show` only; it installs nothing, but does accept WinGet's source agreements on the workstation). Tested offline by [`Tests/IntuneGraphUpload.Tests.ps1`](Tests/IntuneGraphUpload.Tests.ps1) (Windows PowerShell 5.1 and PowerShell 7).
+- [`Printer-Intune_Helpers.ps1`](Other_Tools/Printer-Intune_Helpers.ps1), [`Printer-IntuneBulk.ps1`](Other_Tools/Printer-IntuneBulk.ps1), [`CsvGrid-Editor_Helpers.ps1`](Other_Tools/CsvGrid-Editor_Helpers.ps1) — the printer name/description/notes builders shared by the printer wizard and the bulk tools, the bulk tools' logic, and the built-in sheet editor used when no program opens `.csv` files. Tested offline by [`Tests/PrinterIntuneBulk.Tests.ps1`](Tests/PrinterIntuneBulk.Tests.ps1).
 - Print-server migration tools — [`Export-PrinterServer-CSV.ps1`](Other_Tools/Export-PrinterServer-CSV.ps1), [`Convert-PrinterCSV-ToJSON.ps1`](Other_Tools/Convert-PrinterCSV-ToJSON.ps1), [`Export-PrinterServer-Drivers.ps1`](Other_Tools/Export-PrinterServer-Drivers.ps1), and [`Convert-VendorPack-ToDriverZip.ps1`](Other_Tools/Convert-VendorPack-ToDriverZip.ps1). See below.
 
 ### Migrating from a print server

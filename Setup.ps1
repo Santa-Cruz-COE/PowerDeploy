@@ -100,6 +100,12 @@ $IntuneUploadScriptPath = "$RepoRoot\Other_Tools\Upload-InTuneWin32App.ps1"
 $WinGetDescriptionScriptPath = "$RepoRoot\Other_Tools\Get-WinGetAppDescription.ps1"
 # Standard icon for every printer published to Intune (plain on purpose: users see "a printer")
 $PrinterIconPath = "$RepoRoot\Templates\Printer-Icon.png"
+# Path to the shared printer/Intune builders (dot-sourced below: functions only)
+$PrinterIntuneHelpersScriptPath = "$RepoRoot\Other_Tools\Printer-Intune_Helpers.ps1"
+# Path to the bulk printer tools: bulk create from PrinterData.json, bulk delete (dot-sourced below: functions only)
+$PrinterIntuneBulkScriptPath = "$RepoRoot\Other_Tools\Printer-IntuneBulk.ps1"
+# Path to the built-in sheet editor the bulk tools use when no program opens .csv files (dot-sourced below: functions only)
+$CsvGridEditorScriptPath = "$RepoRoot\Other_Tools\CsvGrid-Editor_Helpers.ps1"
 
 # ---------------------------------------------------------------------------
 # Optional Intune upload feature (spec 3): loaded at SCRIPT scope, functions only
@@ -166,6 +172,72 @@ try {
 } Catch {
 
     $WinGetDescriptionLoadError = $_.Exception.Message
+
+}
+
+# Shared printer/Intune builders, loaded the same way. Both Intune wizards (printer and app) build
+# their Description/Notes with these, so a load failure is shown straight away instead of surfacing
+# later as "command not found" halfway through a wizard.
+$PrinterIntuneHelpersLoadError = $null
+
+try {
+
+    if (-not (Test-Path -LiteralPath $PrinterIntuneHelpersScriptPath)) {
+        throw "The shared printer builders were not found at $PrinterIntuneHelpersScriptPath"
+    }
+    . $PrinterIntuneHelpersScriptPath
+
+    if (-not (Get-Command -Name 'New-PDPrinterIntuneMetadata' -CommandType Function -ErrorAction SilentlyContinue)) {
+        throw "Printer-Intune_Helpers.ps1 loaded without defining New-PDPrinterIntuneMetadata; it may be from a different version."
+    }
+
+} Catch {
+
+    $PrinterIntuneHelpersLoadError = $_.Exception.Message
+    Write-Host "WARNING: $PrinterIntuneHelpersLoadError" -ForegroundColor Yellow
+    Write-Host "WARNING: The Intune setup wizards for printers and apps will not work until this is fixed." -ForegroundColor Yellow
+
+}
+
+# Bulk printer tools (bulk create / bulk delete). Optional like the uploader: a problem here only
+# disables the two bulk menu entries, which say why.
+$PrinterIntuneBulkLoadError = $null
+
+try {
+
+    if (-not (Test-Path -LiteralPath $PrinterIntuneBulkScriptPath)) {
+        throw "The bulk printer tools were not found at $PrinterIntuneBulkScriptPath"
+    }
+    . $PrinterIntuneBulkScriptPath
+
+    if (-not (Get-Command -Name 'Invoke-PDPrinterBulkCreate' -CommandType Function -ErrorAction SilentlyContinue)) {
+        throw "Printer-IntuneBulk.ps1 loaded without defining Invoke-PDPrinterBulkCreate; it may be from a different version."
+    }
+
+} Catch {
+
+    $PrinterIntuneBulkLoadError = $_.Exception.Message
+
+}
+
+# Built-in sheet editor (optional): without it the bulk tools fall back to Notepad when this PC has
+# no program for .csv files.
+$CsvGridEditorLoadError = $null
+
+try {
+
+    if (-not (Test-Path -LiteralPath $CsvGridEditorScriptPath)) {
+        throw "The built-in sheet editor was not found at $CsvGridEditorScriptPath"
+    }
+    . $CsvGridEditorScriptPath
+
+    if (-not (Get-Command -Name 'Show-PDCsvGridEditor' -CommandType Function -ErrorAction SilentlyContinue)) {
+        throw "CsvGrid-Editor_Helpers.ps1 loaded without defining Show-PDCsvGridEditor; it may be from a different version."
+    }
+
+} Catch {
+
+    $CsvGridEditorLoadError = $_.Exception.Message
 
 }
 
@@ -827,113 +899,38 @@ function Printer--InTune-Setup{
 
     Write-Log "" "INFO2"
 
-        # Create install command    
-
-        [hashtable]$FunctionParams = @{
-            PrinterName = $PrinterName
-        }
-
-
-
-        $ReturnHash2 = & $GenerateInstallCommand_ScriptPath -DesiredFunction "InstallPrinterByIP" -RepoURL $RepoURL -RepoNickName $Global:TargetRepoNickName -RepoBranch $Global:RepoBranch -TargetWorkingDirectory $Global:TargetWorkingDirectory -FunctionParams $FunctionParams
-
-        # Check the returned hashtable
-        if(($ReturnHash2 -eq $null) -or ($ReturnHash2.Count -eq 0)){
-            Write-Log "No data returned!" "ERROR"
+        # Install/uninstall commands, detection script, display name, Description, Notes and the upload
+        # metadata come from the shared printer builder (Other_Tools\Printer-Intune_Helpers.ps1), the
+        # same code the bulk printer tools use, so a printer looks the same however it was published.
+        try {
+            $PrinterBuild = New-PDPrinterIntuneMetadata -PrinterName $PrinterName `
+                -Department $Department -Location $Location -Model $Model -Asset $Asset -PrinterIP $PrinterIP `
+                -Verified $Verified -Publisher $publisher `
+                -IntuneWinPath $PrinterIntuneWinPath `
+                -RepoUrl $RepoURL -RepoNickName $Global:TargetRepoNickName -RepoBranch $Global:RepoBranch `
+                -TargetWorkingDirectory $Global:TargetWorkingDirectory -DeployMode $Global:DeployMode `
+                -RepoRoot $RepoRoot -IconPath $PrinterIconPath `
+                -GenerateInstallCommandPath $GenerateInstallCommand_ScriptPath `
+                -Log { param($Message, $Level) Write-Log $Message $Level }
+        } Catch {
+            # 'No data returned!' was already logged by the builder, exactly as before it moved out.
+            if ($_.Exception.Message -ne 'No data returned!') { Write-Log "$($_.Exception.Message)" "ERROR" }
             Exit 1
         }
 
-        Write-Log "Values retrieved:" "INFO2"
-
-        foreach ($key in $ReturnHash2.Keys) {
-
-            $value = $ReturnHash2[$key]
-            Write-Log "   $key : $value" "INFO2"
-
-        }    
-
-        # $result = $ReturnHash2
-        # foreach ($key in $result.Keys) {
-
-        #     Write-Host "   $key : $($result[$key])"
-
-        # }
-
-
-        # Turn the returned hashtable into variables
-        Write-Log "Setting values as local variables..." "INFO2"
-        foreach ($key in $ReturnHash2.Keys) {
-            Set-Variable -Name $key -Value $ReturnHash2[$key] -Scope Local
-            # Write-Log "Should be: $key = $($ReturnHash[$key])"
-            $targetValue = Get-Variable -Name $key -Scope Local
-            Write-Log "Ended up as: $key = $($targetValue.Value)" "INFO2"
-
-
+        # The same local variables this wizard had when the builder was inline (the guided walkthrough
+        # below prints several of them).
+        foreach ($BuildValues in @($PrinterBuild.InstallValues, $PrinterBuild.UninstallValues)) {
+            foreach ($key in $BuildValues.Keys) {
+                Set-Variable -Name $key -Value $BuildValues[$key] -Scope Local
+            }
         }
+        $CurrentGitVer              = $PrinterBuild.SourceCommit
+        $PotentialPrinterInTuneName = $PrinterBuild.DisplayName
+        $PrinterDescriptionText     = $PrinterBuild.Description
+        $PrinterTechnicalNotes      = $PrinterBuild.TechnicalNotes
+        $PrinterIntuneMetadata      = $PrinterBuild.Metadata
 
-        # Create uninstall command    
-
-        [hashtable]$FunctionParams = @{
-            PrinterName = $PrinterName
-        }
-
-        $ReturnHash3 = & $GenerateInstallCommand_ScriptPath -DesiredFunction "UninstallPrinterByName" -RepoURL $RepoURL -RepoNickName $Global:TargetRepoNickName -RepoBranch $Global:RepoBranch -TargetWorkingDirectory $Global:TargetWorkingDirectory -FunctionParams $FunctionParams
-
-        # Check the returned hashtable
-        if(($ReturnHash3 -eq $null) -or ($ReturnHash3.Count -eq 0)){
-            Write-Log "No data returned!" "ERROR"
-            Exit 1
-        }
-
-        Write-Log "Values retrieved:" "INFO2"
-
-        foreach ($key in $ReturnHash3.Keys) {
-
-            $value = $ReturnHash3[$key]
-            Write-Log "   $key : $value" "INFO2"
-
-        }    
-
-        # $result = $ReturnHash2
-        # foreach ($key in $result.Keys) {
-
-        #     Write-Host "   $key : $($result[$key])"
-
-        # }
-
-
-        # Turn the returned hashtable into variables
-        Write-Log "Setting values as local variables..." "INFO2"
-        foreach ($key in $ReturnHash3.Keys) {
-            Set-Variable -Name $key -Value $ReturnHash3[$key] -Scope Local
-            # Write-Log "Should be: $key = $($ReturnHash[$key])"
-            $targetValue = Get-Variable -Name $key -Scope Local
-            Write-Log "Ended up as: $key = $($targetValue.Value)" "INFO2"
-
-
-        }
-
-        # Specs of working repo
-            # Commit of the local repo, plus a marker if the packaged Git-Runner has uncommitted edits
-            $CurrentGitVer = git -C $RepoRoot rev-parse --short HEAD 2>$null
-            if (-not $CurrentGitVer) { $CurrentGitVer = "unknown" }
-            $RunnerChanges = git -C $RepoRoot status --porcelain -- "Templates/Git-Runner_TEMPLATE.ps1"
-            if ($RunnerChanges) { $CurrentGitVer = "$CurrentGitVer.UnstagedChanges" }
-
-    if ($Department){
-        $PRn = "PRINTER - $DEPARTMENT"
-    } else {
-        $PRn = "PRINTER"
-    }
-
-    if ($Global:DeployMode -eq "Production"){
-
-            $PotentialPrinterInTuneName = "$PRn"+": $PrinterName"
-
-    } else {
-            $PotentialPrinterInTuneName = "$PRn"+": $PrinterName [$Global:DeployMode] [VER: $CurrentGitVer]"
-    }
-        
     Clear
     Write-Log ""
     Write-Log "Install command, uninstall command, and detection script created!" "SUCCESS"
@@ -942,29 +939,6 @@ function Printer--InTune-Setup{
     # Write-Log ""
     # Pause
     # Write-Log ""
-
-    # Set the publisher to PowerDeploy if it is missing
-    if($publisher -eq "" -or $null -eq $publisher){$publisher = "PowerDeploy"}
-
-    # Intune text, built once before any publishing choice (spec 5.1 step 2). Description is what
-    # users see in the Company Portal; Notes is the admin-only technical block (spec 4.2 / 4.4).
-    $PrinterDescriptionText = New-IntunePrinterDescription -Department $Department -Location $Location -Model $Model -Asset $Asset -PrinterIP $PrinterIP
-    $PrinterTechnicalNotes  = New-IntuneTechnicalNotes -TargetRepo $RepoUrl -TargetBranch $Global:RepoBranch -SourceCommit $CurrentGitVer -Verified $Verified -SourceRepoRoot $RepoRoot
-
-    $PrinterIntuneMetadata = @{
-        IntuneWinPath           = $PrinterIntuneWinPath
-        DisplayName             = $PotentialPrinterInTuneName
-        Description             = $PrinterDescriptionText
-        Publisher               = $publisher
-        AppVersion              = $CurrentGitVer
-        Category                = 'Printers'
-        Notes                   = $PrinterTechnicalNotes
-        InstallCommandFile      = $MainInstallCommandTXT
-        UninstallCommandFile    = $UninstallCommandTXT
-        DetectionScriptFile     = $DetectPrinterScript
-        AllowAvailableUninstall = $true
-        IconFile                = $(if (Test-Path -LiteralPath $PrinterIconPath) { $PrinterIconPath } else { "" })
-    }
 
     Clear
     Write-Log "==========================================================================================="
@@ -1084,6 +1058,705 @@ Write-LogBlock "`n$PotentialPrinterInTuneName`n"
 
 
 }
+# ---------------------------------------------------------------------------
+# Bulk printer tools (logic: Other_Tools\Printer-IntuneBulk.ps1; plan: printer-bulk-tools.buildplan.md)
+# ---------------------------------------------------------------------------
+# The two menu entries below own every prompt; the library does the work. Neither ever calls exit:
+# every failure returns to the main menu.
+
+Function Test-PrinterBulkReady {
+
+    # Shared preconditions for both bulk tools. Returns $true when the tool can run.
+    if ($PrinterIntuneHelpersLoadError) {
+        Write-Log "The bulk printer tools cannot run: $PrinterIntuneHelpersLoadError" 'ERROR'
+        return $false
+    }
+    if ($PrinterIntuneBulkLoadError) {
+        Write-Log "The bulk printer tools cannot run: $PrinterIntuneBulkLoadError" 'ERROR'
+        return $false
+    }
+    if (-not $GraphUploadAvailable) {
+        Write-Log "The bulk printer tools use the Intune API, which is not available on this workstation: $GraphUploadLoadError" 'ERROR'
+        return $false
+    }
+
+    try {
+        $Credential = Get-PDGraphCredential
+        foreach ($Warning in @($Credential.Warnings)) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$Warning)) { Write-Log $Warning 'WARNING' }
+        }
+    } Catch {
+        Show-GraphUploadError -Failure $_
+        Write-Log ""
+        Write-Log "The upload credential is set up from the main menu with InTuneAPI--Setup-and-Manage." 'WARNING'
+        return $false
+    }
+
+    return $true
+}
+
+Function Open-PrinterBulkSheet {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    Write-Log "The sheet is here:"
+    Write-LogBlock "`n$Path`n"
+    try {
+        Start-Process -FilePath $Path -ErrorAction Stop
+        Write-Log "It has been opened for you (usually in Excel)." "INFO2"
+    } Catch {
+        Write-Log "It could not be opened automatically. Open it from the path above." 'WARNING'
+    }
+}
+
+Function Wait-PrinterBulkSheet {
+
+    # $true when the operator says the sheet is saved, $false when they cancel.
+    Write-Log ""
+    Write-Log "Edit the sheet, SAVE it (keep the CSV format), and close it." 'WARNING'
+    $Answer = ([string](Read-Host "Press Enter when it is saved, or type exit to cancel")).Trim()
+    return ($Answer -ine 'exit')
+}
+
+Function Edit-PrinterBulkSheet {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][ValidateSet('Create', 'Delete')][string]$Kind,
+        [AllowEmptyCollection()][string[]]$Problems = @()
+    )
+
+    # Opens the sheet for editing and waits. $true when it is saved and ready to check, $false when
+    # the operator cancels. In order: the PC's own program for .csv files (usually Excel); LibreOffice
+    # Calc if it is installed, or offered for install (never installed without a yes); PowerDeploy's
+    # built-in editor window; Notepad.
+    $Program = $null
+    if (Get-Command -Name 'Get-PDCsvAssociatedProgram' -CommandType Function -ErrorAction SilentlyContinue) { $Program = Get-PDCsvAssociatedProgram }
+
+    if ($Program) {
+        Open-PrinterBulkSheet -Path $Path
+        return (Wait-PrinterBulkSheet)
+    }
+
+    $LibreOffice = $null
+    if (-not $CsvGridEditorLoadError) {
+        $LibreOffice = Find-PDLibreOffice
+
+        # Asked once per Setup session: a "no" is not repeated every time the sheet is re-checked.
+        if (-not $LibreOffice -and -not $script:PrinterBulkLibreOfficeDeclined) {
+            Write-Log ""
+            Write-Log "No program is set up to open .csv files on this PC." 'WARNING'
+            Write-Log "PowerDeploy can install LibreOffice (free, open source spreadsheet; about 360 MB download) from its app catalog, and open the sheet in it."
+            if (Read-GraphUploadYesNo -Question 'Install LibreOffice now?' -Default $false -Note "Answer n to use PowerDeploy's basic built-in editor instead (you will not be asked again until Setup restarts).") {
+                # Installed like any catalog app: the 'LibreOffice' entry in the public catalog
+                # (Templates\ApplicationData_TEMPLATE.json, InstallMethod WinGet) through the JSON app
+                # installer, exactly what WindowsApp--Install-Local runs for it.
+                Write-Log "Installing LibreOffice from the PowerDeploy app catalog (WinGet). This can take several minutes..."
+                & $JSONAppInstaller_ScriptPath -TargetAppName 'LibreOffice'
+                $InstallExit = $LASTEXITCODE
+                $LibreOffice = Find-PDLibreOffice
+                if ($LibreOffice) {
+                    Write-Log "LibreOffice is installed." 'SUCCESS'
+                } else {
+                    Write-Log "LibreOffice could not be installed (exit code $InstallExit). The installer logs under Logs\Installer_Logs have the details. Using the built-in editor instead." 'ERROR'
+                    $script:PrinterBulkLibreOfficeDeclined = $true
+                }
+            } else {
+                $script:PrinterBulkLibreOfficeDeclined = $true
+            }
+        }
+    }
+
+    if ($LibreOffice) {
+        Write-Log ""
+        Write-Log "Opening the sheet in LibreOffice Calc:"
+        Write-LogBlock "`n$Path`n"
+        Write-Log "When you save (Ctrl+S), LibreOffice asks which format to keep: choose 'Use Text CSV Format!'." 'WARNING'
+        Write-Log "Then close LibreOffice (or at least this sheet) before pressing Enter here."
+        try {
+            Start-Process -FilePath $LibreOffice -ArgumentList (Get-PDLibreOfficeCsvArguments -Path $Path) -ErrorAction Stop
+            return (Wait-PrinterBulkSheet)
+        } Catch {
+            Write-Log "LibreOffice could not be started: $($_.Exception.Message). Using the built-in editor instead." 'WARNING'
+        }
+    }
+
+    if ($CsvGridEditorLoadError) {
+        Write-Log "The built-in sheet editor is not available: $CsvGridEditorLoadError" 'WARNING'
+    } else {
+        if ($Kind -eq 'Create') {
+            $Instructions = "Tick Include for every printer to create; untick the ones to leave out.`r`n" +
+                            "RequiredGroups: groups the printer is installed on automatically. AvailableGroups: groups that can install it from the Company Portal.`r`n" +
+                            "Separate several groups with ';'. Use exact group names or object IDs, or /AllDevices or /AllUsers.`r`n" +
+                            "Grey columns are for reference only. To fill many rows at once: select the cells, type the groups in 'Set selected cells to', and press Apply."
+            $Editable = @('RequiredGroups', 'AvailableGroups')
+            $Flags    = @('Include')
+            $Title    = 'PowerDeploy - Bulk create printers'
+        } else {
+            $Instructions = "Tick Delete for every printer app to delete from Intune. Grey columns are for reference only.`r`n" +
+                            "Devices that already have a printer keep it; this only cleans up Intune."
+            $Editable = @()
+            $Flags    = @('Delete')
+            $Title    = 'PowerDeploy - Bulk delete printer apps'
+        }
+
+        Write-Log ""
+        Write-Log "The sheet opens in PowerDeploy's own editor window." 'WARNING'
+        Write-Log "Edit it there and press 'Save and continue'. (If you don't see it, check the taskbar.)"
+        $Edited = Show-PDCsvGridEditor -Path $Path -Title $Title -Instructions $Instructions -EditableColumns $Editable -FlagColumns $Flags -Messages $Problems
+        if ($Edited.Result -eq 'Saved') { Write-Log "Sheet saved." 'SUCCESS'; return $true }
+        if ($Edited.Result -eq 'Cancelled') { return $false }
+        Write-Log "The built-in editor could not open: $($Edited.Reason)" 'WARNING'
+    }
+
+    Write-Log "Opening the sheet in Notepad instead. Keep the commas and quotes exactly as they are; only change values." 'WARNING'
+    Write-LogBlock "`n$Path`n"
+    try { Start-Process -FilePath 'notepad.exe' -ArgumentList ('"{0}"' -f $Path) -ErrorAction Stop } Catch { Write-Log "Notepad could not be started. Open the file from the path above." 'WARNING' }
+    return (Wait-PrinterBulkSheet)
+}
+
+Function Get-PrinterBulkJsonPath {
+    param([Parameter(Mandatory = $true)][ValidateSet('Blob', 'Local')][string]$Source)
+
+    # Returns a local PrinterData.json path, or $null when the operator cancels. A failed download
+    # offers a local file instead of ending the run.
+    if ($Source -eq 'Blob') {
+
+        $DownloadProblem = $null
+        if ([string]::IsNullOrWhiteSpace($PrinterDataJSONpath) -or [string]::IsNullOrWhiteSpace($StorageAccountName) -or [string]::IsNullOrWhiteSpace($PrinterContainerSASkey)) {
+            $DownloadProblem = "This PC does not have the organization's printer storage settings (PrinterDataJSONpath, StorageAccountName, PrinterContainerSASkey), so PrinterData.json cannot be downloaded."
+        } else {
+            $parts = $PrinterDataJSONpath -split '/', 2
+            $PrinterData_JSON_ContainerName = $parts[0]
+            $PrinterData_JSON_BlobName = $parts[1]
+
+            Write-Log "Downloading the current PrinterData.json..."
+            & $DownloadAzureBlobSAS_ScriptPath -WorkingDirectory $WorkingDirectory -BlobName $PrinterData_JSON_BlobName -StorageAccountName $StorageAccountName -ContainerName $PrinterData_JSON_ContainerName -SasToken $PrinterContainerSASkey
+            $LocalJSONpath = "$WorkingDirectory\TEMP\Downloads\$PrinterData_JSON_BlobName"
+            if ($LASTEXITCODE -ne 0) {
+                $DownloadProblem = "Downloading PrinterData.json failed (exit code $LASTEXITCODE). The Azure Blob downloader logs have the details."
+            } elseif (-not (Test-Path -LiteralPath $LocalJSONpath)) {
+                $DownloadProblem = "The download reported success, but the file is not at $LocalJSONpath."
+            } else {
+                return $LocalJSONpath
+            }
+        }
+
+        Write-Log $DownloadProblem 'ERROR'
+        if (-not (Read-GraphUploadYesNo -Question 'Use a PrinterData.json file on this PC instead?' -Default $false)) { return $null }
+    }
+
+    While ($true) {
+        $Typed = ([string](Read-Host "Full path to the PrinterData.json file (or exit)")).Trim().Trim('"').Trim("'")
+        if ($Typed -ieq 'exit') { return $null }
+        if (-not [string]::IsNullOrWhiteSpace($Typed) -and (Test-Path -LiteralPath $Typed -PathType Leaf)) { return $Typed }
+        Write-Log "No file was found at '$Typed'." 'ERROR'
+    }
+}
+
+Function Printer--InTune-BulkCreate {
+
+    Write-Log "==========================================================================================="
+    Write-Log "SCRIPT: $LocalFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START"
+    Write-Log "==========================================================================================="
+    Write-Log ""
+    Write-Log "BULK CREATE PRINTERS IN INTUNE"
+    Write-Log ""
+    Write-Log "Creates Intune apps for many printers from PrinterData.json in one go:"
+    Write-Log "  1 - You get a sheet (CSV) with every printer. Set Include to N (or delete the row) for printers you don't want, and fill in the groups."
+    Write-Log "  2 - The sheet is checked: every group must exist, and printers already in Intune (same name, same deployment mode) are found."
+    Write-Log "  3 - For printers that already exist you choose: override (the new app is created, then the old one is backed up and deleted) or skip."
+    Write-Log "  4 - Nothing is created until you confirm the summary."
+    Write-Log ""
+
+    if (-not (Test-PrinterBulkReady)) { Pause; return }
+
+    $RepoUrl = Set-URL
+
+    # --- One question: how to start --------------------------------------------------------------
+    # Printer details (IP, driver, department) always come from PrinterData.json; a sheet only holds
+    # the operator's choices (which printers, which groups). So a pre-existing sheet still needs the
+    # JSON, and gets the current one from blob.
+    Write-Log "How do you want to start?" 'WARNING'
+    Write-Log ""
+    Write-Log "     1 - Start a fresh spreadsheet export from PrinterData.json in Azure Blob (normal)"
+    Write-Log "     2 - Start a fresh spreadsheet export from a PrinterData.json file on this PC"
+    Write-Log "     3 - Use a pre-existing sheet (you can resume previous runs with this)"
+    Write-Log ""
+    While ($true) {
+        $StartChoice = ([string](Read-Host "1/2/3 (or exit)")).Trim()
+        if ($StartChoice -ieq 'exit') { Write-Log "Cancelled. Nothing was created." 'WARNING'; Pause; return }
+        if (@('1', '2', '3') -contains $StartChoice) { break }
+        Write-Log "Invalid input. Please enter 1, 2 or 3." 'ERROR'
+    }
+
+    $Earlier = $null
+    if ($StartChoice -eq '3') {
+        # Offer the most recent earlier runs by number. A run's results.csv marks only the printers
+        # that did not finish as Include = Y; a run that never got that far offers its draft.csv.
+        $RecentSheets = @()
+        $BulkRoot = Join-Path $WorkingDirectory 'TEMP\PrinterBulk'
+        if (Test-Path -LiteralPath $BulkRoot) {
+            foreach ($RunDir in @(Get-ChildItem -LiteralPath $BulkRoot -Directory -Filter 'Create_*' | Sort-Object Name -Descending)) {
+                foreach ($Candidate in @('results.csv', 'draft.csv')) {
+                    $CandidatePath = Join-Path $RunDir.FullName $Candidate
+                    if (Test-Path -LiteralPath $CandidatePath) { $RecentSheets += $CandidatePath; break }
+                }
+                if ($RecentSheets.Count -ge 5) { break }
+            }
+        }
+
+        if ($RecentSheets.Count -gt 0) {
+            Write-Log ""
+            Write-Log "Recent sheets from earlier runs (newest first):"
+            for ($i = 0; $i -lt $RecentSheets.Count; $i++) {
+                $Marked = '?'
+                try { $Marked = @(Read-PDBulkCsv -Path $RecentSheets[$i] -RequiredColumns @('Include') | Where-Object { Test-PDBulkYes -Value $_.Include }).Count } Catch { }
+                Write-Log ("     {0} - {1}\{2}  ({3} printer(s) marked Include = Y)" -f ($i + 1), (Split-Path (Split-Path $RecentSheets[$i] -Parent) -Leaf), (Split-Path $RecentSheets[$i] -Leaf), $Marked)
+            }
+            Write-Log ""
+        }
+
+        While ($true) {
+            $Earlier = ([string](Read-Host "Enter a number from the list, or the full path to a sheet (or exit)")).Trim().Trim('"').Trim("'")
+            if ($Earlier -ieq 'exit') { Write-Log "Cancelled. Nothing was created." 'WARNING'; Pause; return }
+            $Picked = 0
+            if ([int]::TryParse($Earlier, [ref]$Picked) -and $Picked -ge 1 -and $Picked -le $RecentSheets.Count) { $Earlier = $RecentSheets[$Picked - 1] }
+            if (-not [string]::IsNullOrWhiteSpace($Earlier) -and (Test-Path -LiteralPath $Earlier -PathType Leaf)) { break }
+            Write-Log "No file was found at '$Earlier'." 'ERROR'
+        }
+        Write-Log "Using: $Earlier"
+        Write-Log ""
+        Write-Log "The printer details for that sheet come from the current PrinterData.json." 'INFO2'
+    }
+
+    # --- PrinterData.json --------------------------------------------------------------------------
+    $JsonSource = 'Blob'
+    if ($StartChoice -eq '2') { $JsonSource = 'Local' }
+    $JsonPath = Get-PrinterBulkJsonPath -Source $JsonSource
+    if (-not $JsonPath) { Write-Log "Cancelled. Nothing was created." 'WARNING'; Pause; return }
+
+    $Catalog = Get-PDPrinterJsonCatalog -Path $JsonPath
+    if (@($Catalog.Errors).Count -gt 0) {
+        Write-Log ""
+        Write-Log "PrinterData.json has problems that must be fixed first:" 'ERROR'
+        foreach ($Problem in @($Catalog.Errors)) { Write-Log "     - $Problem" 'ERROR' }
+        Pause
+        return
+    }
+
+    Write-Log ""
+    Write-Log ("Found {0} printer(s) in PrinterData.json." -f @($Catalog.Printers).Count) 'SUCCESS'
+    if ($Catalog.Problems.Count -gt 0) {
+        Write-Log ("{0} of them would fail to install as written; they start with Include = N and the reason in the Problem column." -f $Catalog.Problems.Count) 'WARNING'
+    }
+    Write-Log ""
+
+    $SourceCommit = Get-PDPrinterSourceCommit -RepoRoot $RepoRoot
+    $RunFolder    = Join-Path $WorkingDirectory ("TEMP\PrinterBulk\Create_" + (Get-Date -Format 'yyyyMMdd_HHmmss'))
+    $SheetPath    = Join-Path $RunFolder 'draft.csv'
+
+    # --- The sheet ---------------------------------------------------------------------------------
+    if ($StartChoice -eq '3') {
+        New-Item -ItemType Directory -Path $RunFolder -Force | Out-Null
+        Copy-Item -LiteralPath $Earlier -Destination $SheetPath -Force
+    } else {
+        # Default groups (decision D4): pre-filled into every row; blank skips it.
+        Write-Log ""
+        Write-Log "DEFAULT GROUPS: pre-filled into every row of the sheet, and you can still change any row." 'WARNING'
+        Write-Log "Leave both blank to skip this and start with empty group columns."
+        Write-Log ""
+        [string[]]$DefaultRequired  = @(Read-IntuneGroupList -Intent 'Required')
+        Write-Log ""
+        [string[]]$DefaultAvailable = @(Read-IntuneGroupList -Intent 'Available')
+        Write-Log ""
+
+        # Picking a handful out of many is easier from an all-unticked sheet.
+        $IncludeAll = Read-GraphUploadYesNo -Question 'Start with every printer ticked (Include = Y)?' -Default $true `
+                                            -Note 'Answer n to start with none ticked, then tick only the printers you want.'
+        Write-Log ""
+
+        $Draft = New-PDPrinterBulkDraft -Catalog $Catalog -DeployMode $Global:DeployMode -SourceCommit $SourceCommit `
+                                        -DefaultRequiredGroups $DefaultRequired -DefaultAvailableGroups $DefaultAvailable `
+                                        -IncludeByDefault $IncludeAll
+        Write-PDBulkCsv -Rows $Draft -Columns (Get-PDPrinterBulkDraftColumns -Catalog $Catalog) -Path $SheetPath
+    }
+
+    Write-Log ""
+    Write-Log "HOW TO EDIT THE SHEET:" 'WARNING'
+    Write-Log "     - Include:          Y to create the printer, N (or delete the row) to leave it out."
+    Write-Log "     - RequiredGroups:   groups the printer is installed on automatically. Separate several with ';'."
+    Write-Log "     - AvailableGroups:  groups that can install it from the Company Portal. Separate several with ';'."
+    Write-Log "       Use exact group names or object IDs, or /AllDevices or /AllUsers."
+    Write-Log "     - Every other column is for reference only, straight from PrinterData.json, and edits to it are ignored."
+    Write-Log "       Change printer details in PrinterData.json itself. PrinterName must not be changed."
+    Write-Log ""
+
+    $AuthContext = @{ Credential = (Get-PDGraphCredential) }
+
+    # --- Stage: check the sheet until it is clean ------------------------------------------------
+    # The problems from the last check go back into the editor window, so they can be fixed in place.
+    $LastProblems = @()
+    While ($true) {
+
+        if (-not (Edit-PrinterBulkSheet -Path $SheetPath -Kind 'Create' -Problems $LastProblems)) { Write-Log "Cancelled. Nothing was created." 'WARNING'; Pause; return }
+        $LastProblems = @()
+
+        try {
+            $Rows = @(Read-PDBulkCsv -Path $SheetPath -RequiredColumns @('Include', 'PrinterName', 'RequiredGroups', 'AvailableGroups'))
+        } Catch {
+            Write-Log $_.Exception.Message 'ERROR'
+            $LastProblems = @($_.Exception.Message)
+            continue
+        }
+
+        Write-Log ""
+        Write-Log "Checking the sheet against Intune (reads only, nothing is created)..."
+
+        try {
+            $Included = @($Rows | Where-Object { Test-PDBulkYes -Value (Get-PDBulkCell -Row $_ -Name 'Include') })
+            $Groups   = Resolve-PDBulkGroups -Rows $Included -AuthContext $AuthContext
+            $Existing = @(Get-PDIntunePrinterApps -AuthContext $AuthContext)
+            $Stage    = Resolve-PDPrinterBulkStage -Rows $Rows -Catalog $Catalog -ExistingApps $Existing -GroupMap $Groups.Map `
+                                                   -DeployMode $Global:DeployMode -SourceCommit $SourceCommit
+            $CategoryCheck = Find-PDIntuneCategory -Category $script:PDBulk.Category -AuthContext $AuthContext
+        } Catch {
+            Show-GraphUploadError -Failure $_
+            if (Read-GraphUploadYesNo -Question 'Check the sheet again?' -Default $true -Note 'Answer n to cancel. Nothing has been created.') { continue }
+            Pause
+            return
+        }
+
+        $SheetProblems = @(@($Groups.Errors) + @($Stage.Errors))
+        if ($SheetProblems.Count -gt 0) {
+            Write-Log ""
+            Write-Log ("The sheet has {0} problem(s). Nothing has been created:" -f $SheetProblems.Count) 'ERROR'
+            foreach ($Problem in $SheetProblems) { Write-Log "     - $Problem" 'ERROR' }
+            Write-Log ""
+            Write-Log "Fix them in the sheet, save it, and it will be checked again."
+            $LastProblems = $SheetProblems
+            continue
+        }
+
+        if (@($Stage.Rows).Count -eq 0) {
+            Write-Log "No printers are marked Include = Y." 'WARNING'
+            $LastProblems = @('No printers are marked Include = Y.')
+            continue
+        }
+
+        break
+    }
+
+    # --- Printers that already exist (decision D3) ----------------------------------------------
+    $Conflicts = @($Stage.Rows | Where-Object { $_.Action -eq 'Conflict' })
+    if ($Conflicts.Count -gt 0) {
+        Write-Log ""
+        Write-Log ("{0} printer(s) already exist in Intune in {1} mode:" -f $Conflicts.Count, $Global:DeployMode) 'WARNING'
+        foreach ($Row in $Conflicts) {
+            foreach ($Old in @($Row.Matches)) { Write-Log ("     {0}  ->  existing: {1} ({2})" -f $Row.PrinterName, $Old.DisplayName, $Old.AppId) }
+        }
+        Write-Log ""
+        Write-Log "Override = create the new app, then back up and delete the existing one (its install history in Intune is lost)."
+        Write-Log "Skip     = leave the existing app alone and do not create this printer."
+        Write-Log ""
+        Write-Log "     1 - Override all"
+        Write-Log "     2 - Skip all"
+        Write-Log "     3 - Decide each"
+        Write-Log ""
+        While ($true) {
+            $ConflictChoice = ([string](Read-Host "1/2/3")).Trim()
+            if (@('1', '2', '3') -contains $ConflictChoice) { break }
+            Write-Log "Invalid input. Please enter 1, 2 or 3." 'ERROR'
+        }
+
+        foreach ($Row in $Conflicts) {
+            switch ($ConflictChoice) {
+                '1' { $Row.Action = 'Override' }
+                '2' { $Row.Action = 'Skip' }
+                '3' {
+                    $ExistingNames = (@($Row.Matches) | ForEach-Object { $_.DisplayName }) -join '; '
+                    if (Read-GraphUploadYesNo -Question ("Override '{0}' (existing: {1})?" -f $Row.PrinterName, $ExistingNames) -Default $false) {
+                        $Row.Action = 'Override'
+                    } else {
+                        $Row.Action = 'Skip'
+                    }
+                }
+            }
+        }
+    }
+
+    $StagedPath = Join-Path $RunFolder 'staged.csv'
+    Write-PDBulkCsv -Rows $Stage.Rows -Columns $script:PDBulk.StagedColumns -Path $StagedPath
+
+    $Creates   = @($Stage.Rows | Where-Object { $_.Action -eq 'Create' })
+    $Overrides = @($Stage.Rows | Where-Object { $_.Action -eq 'Override' })
+    $Skips     = @($Stage.Rows | Where-Object { $_.Action -eq 'Skip' })
+    $OldApps   = 0
+    foreach ($Row in $Overrides) { $OldApps += @($Row.Matches).Count }
+    $OtherMode = @($Stage.Rows | Where-Object { @($_.OtherModeMatches).Count -gt 0 })
+
+    # --- Summary and confirmation -------------------------------------------------------------
+    Clear
+    Write-Log "==========================================================================================="
+    Write-Log "SUMMARY - nothing has been created in Intune yet"
+    Write-Log "==========================================================================================="
+    Write-Log ""
+    Write-Log " Deployment mode:  $Global:DeployMode"
+    Write-Log (" Repo / branch:    {0} ({1})" -f (Get-IntuneDisplayUrl -Url $RepoUrl), $Global:RepoBranch)
+    Write-Log ""
+    Write-Log (" Create:    {0}" -f $Creates.Count)
+    Write-Log (" Override:  {0}  (then {1} existing app(s) backed up and deleted)" -f $Overrides.Count, $OldApps)
+    Write-Log (" Skip:      {0}" -f $Skips.Count)
+    Write-Log (" Left out:  {0}  (Include = N)" -f $Stage.Excluded)
+    Write-Log ""
+    if ($null -ne $CategoryCheck -and [string]$CategoryCheck.Status -ne 'Resolved') {
+        Write-Log ("The '{0}' app category was not found in Intune, so the apps will be created without a category." -f $script:PDBulk.Category) 'WARNING'
+        Write-Log ""
+    }
+    $EditedCells = @($Stage.Warnings)
+    if ($EditedCells.Count -gt 0) {
+        Write-Log ("{0} reference cell(s) in the sheet differ from PrinterData.json. They are IGNORED: printers are built from PrinterData.json." -f $EditedCells.Count) 'WARNING'
+        foreach ($Edited in @($EditedCells | Select-Object -First 10)) { Write-Log "     $Edited" 'WARNING' }
+        if ($EditedCells.Count -gt 10) { Write-Log ("     ...and {0} more." -f ($EditedCells.Count - 10)) 'WARNING' }
+        Write-Log "To change printer details, edit PrinterData.json and start a fresh export." 'WARNING'
+        Write-Log ""
+    }
+    if ($OtherMode.Count -gt 0) {
+        Write-Log ("For information: {0} printer(s) also exist in another deployment mode. Those apps are never touched:" -f $OtherMode.Count) 'INFO2'
+        foreach ($Row in $OtherMode) {
+            foreach ($Other in @($Row.OtherModeMatches)) { Write-Log ("     {0} ({1})" -f $Other.DisplayName, $Other.AppId) 'INFO2' }
+        }
+        Write-Log ""
+    }
+    Write-Log "The full plan, row by row, is in:"
+    Write-LogBlock "`n$StagedPath`n"
+
+    if (($Creates.Count + $Overrides.Count) -eq 0) {
+        Write-Log "Nothing to create. Nothing was changed in Intune." 'WARNING'
+        Pause
+        return
+    }
+
+    $Confirm = ([string](Read-Host "Type yes to create these printers in Intune")).Trim()
+    if ($Confirm -ine 'yes') { Write-Log "Cancelled. Nothing was created." 'WARNING'; Pause; return }
+
+    # --- Run --------------------------------------------------------------------------------------
+    # Every printer uses the same package (the Git-Runner template), so it is built once.
+    Write-Log ""
+    Write-Log "Building the Intune package (shared by every printer)..."
+    try {
+        Make-InTuneWin -SourceFile "$GitRunnerScript"
+    } Catch {
+        Write-Log "The Intune package could not be built: $($_.Exception.Message)" 'ERROR'
+        Write-Log "Nothing was created in Intune." 'WARNING'
+        Pause
+        return
+    }
+    $BulkIntuneWinPath = $Global:intunewinpath
+
+    $Context = @{
+        RepoUrl                    = $RepoUrl
+        RepoNickName               = $Global:TargetRepoNickName
+        RepoBranch                 = $Global:RepoBranch
+        TargetWorkingDirectory     = $Global:TargetWorkingDirectory
+        DeployMode                 = $Global:DeployMode
+        RepoRoot                   = $RepoRoot
+        IconPath                   = $PrinterIconPath
+        GenerateInstallCommandPath = $GenerateInstallCommand_ScriptPath
+        IntuneWinPath              = $BulkIntuneWinPath
+        BackupFolder               = (Join-Path $RunFolder 'backups')
+        CredentialPath             = ''
+    }
+
+    Write-Log ""
+    Write-Log ("Creating {0} printer(s). Each one takes a little while..." -f ($Creates.Count + $Overrides.Count))
+    Write-Log ""
+
+    $Results = @(Invoke-PDPrinterBulkCreate -StagedRows $Stage.Rows -Catalog $Catalog -Context $Context -AuthContext $AuthContext `
+        -OnProgress {
+            param($Index, $Total, $Row, $Result)
+            $Level = 'SUCCESS'
+            if ($Result.Result -eq 'Failed') { $Level = 'ERROR' } elseif ($Result.Result -eq 'CreatedOldNotDeleted') { $Level = 'WARNING' }
+            $Detail = ''
+            if ($Result.NewAppId) { $Detail = " (new app $($Result.NewAppId)" + $(if ($Result.DeletedAppIds) { ", replaced $($Result.DeletedAppIds))" } else { ')' }) }
+            Write-Log ("[{0}/{1}] {2} ... {3}{4}" -f $Index, $Total, $Result.IntuneDisplayName, $Result.Result, $Detail) $Level
+        } `
+        -Log { param($Message, $Level) Write-Log $Message $Level -LogOnly })
+
+    $ResultsPath = Join-Path $RunFolder 'results.csv'
+    Write-PDBulkCsv -Rows $Results -Columns $script:PDBulk.ResultColumns -Path $ResultsPath
+
+    # --- Report -----------------------------------------------------------------------------------
+    Write-Log ""
+    Write-Log "==========================================================================================="
+    Write-Log "BULK CREATE FINISHED"
+    Write-Log "==========================================================================================="
+    foreach ($Outcome in @('Created', 'Overridden', 'CreatedOldNotDeleted', 'Failed', 'Skipped')) {
+        $Count = @($Results | Where-Object { $_.Result -eq $Outcome }).Count
+        if ($Count -gt 0) { Write-Log (" {0,-22} {1}" -f $Outcome, $Count) }
+    }
+    $NeedsAttention = @($Results | Where-Object { $_.Result -eq 'Failed' -or $_.Result -eq 'CreatedOldNotDeleted' })
+    if ($NeedsAttention.Count -gt 0) {
+        Write-Log ""
+        Write-Log "Needs attention:" 'WARNING'
+        foreach ($Row in $NeedsAttention) { Write-Log ("     {0}: {1}" -f $Row.PrinterName, $Row.Error) 'WARNING' }
+        Write-Log ""
+        Write-Log "To retry the failed printers, run this again and choose 'Use a pre-existing sheet'; this run is offered at the top of the list."
+        Write-Log "An old app that could not be removed can be deleted with Printer--InTune-BulkDelete."
+    }
+    Write-Log ""
+    Write-Log "Results (one row per printer):"
+    Write-LogBlock "`n$ResultsPath`n"
+    if (Test-Path -LiteralPath $Context.BackupFolder) {
+        Write-Log "Backups of the apps that were replaced:"
+        Write-LogBlock "`n$($Context.BackupFolder)`n"
+    }
+    Write-Log "Please verify a few of the new printers on a test device." 'WARNING'
+    Pause
+}
+
+Function Printer--InTune-BulkDelete {
+
+    Write-Log "==========================================================================================="
+    Write-Log "SCRIPT: $LocalFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START"
+    Write-Log "==========================================================================================="
+    Write-Log ""
+    Write-Log "BULK DELETE PRINTER APPS FROM INTUNE"
+    Write-Log ""
+    Write-Log "Lists every PowerDeploy printer app in Intune (all deployment modes) in a sheet. You mark the"
+    Write-Log "ones to delete; each one is backed up to a file and then deleted."
+    Write-Log ""
+    Write-Log "This only cleans up Intune. Devices that already have a printer KEEP it." 'WARNING'
+    Write-Log ""
+
+    if (-not (Test-PrinterBulkReady)) { Pause; return }
+
+    $AuthContext = @{ Credential = (Get-PDGraphCredential) }
+
+    Write-Log "Reading the printer apps from Intune..."
+    try {
+        $Apps = @(Get-PDIntunePrinterApps -AuthContext $AuthContext)
+    } Catch {
+        Show-GraphUploadError -Failure $_
+        Pause
+        return
+    }
+
+    if ($Apps.Count -eq 0) {
+        Write-Log "No PowerDeploy printer apps were found in Intune." 'WARNING'
+        Pause
+        return
+    }
+
+    Write-Log ("Found {0} printer app(s):" -f $Apps.Count) 'SUCCESS'
+    foreach ($Group in @($Apps | Group-Object DeployMode | Sort-Object Name)) { Write-Log ("     {0,-22} {1}" -f $Group.Name, $Group.Count) }
+    Write-Log ""
+
+    $RunFolder = Join-Path $WorkingDirectory ("TEMP\PrinterBulk\Delete_" + (Get-Date -Format 'yyyyMMdd_HHmmss'))
+    $SheetPath = Join-Path $RunFolder 'delete.csv'
+    Write-PDBulkCsv -Rows (New-PDPrinterDeleteSheet -Apps $Apps) -Columns $script:PDBulk.DeleteColumns -Path $SheetPath
+
+    Write-Log "HOW TO EDIT THE SHEET:" 'WARNING'
+    Write-Log "     - Put Y in the Delete column of every app to delete. Leave it blank to keep the app."
+    Write-Log "     - Rows are matched by AppId only; the other columns are for reference."
+    Write-Log ""
+    $LastProblems = @()
+
+    While ($true) {
+
+        if (-not (Edit-PrinterBulkSheet -Path $SheetPath -Kind 'Delete' -Problems $LastProblems)) { Write-Log "Cancelled. Nothing was deleted." 'WARNING'; Pause; return }
+        $LastProblems = @()
+
+        try {
+            $Rows = @(Read-PDBulkCsv -Path $SheetPath -RequiredColumns @('Delete', 'AppId'))
+        } Catch {
+            Write-Log $_.Exception.Message 'ERROR'
+            $LastProblems = @($_.Exception.Message)
+            continue
+        }
+
+        # A fresh list, so an app deleted or renamed since the sheet was written is caught here.
+        try {
+            $Current = @(Get-PDIntunePrinterApps -AuthContext $AuthContext)
+        } Catch {
+            Show-GraphUploadError -Failure $_
+            if (Read-GraphUploadYesNo -Question 'Try again?' -Default $true -Note 'Answer n to cancel. Nothing has been deleted.') { continue }
+            Pause
+            return
+        }
+
+        $Selection = Resolve-PDPrinterDeleteSelection -Rows $Rows -CurrentApps $Current
+
+        if (@($Selection.Errors).Count -gt 0) {
+            Write-Log "The sheet has problems. Nothing has been deleted:" 'ERROR'
+            foreach ($Problem in @($Selection.Errors)) { Write-Log "     - $Problem" 'ERROR' }
+            $LastProblems = @($Selection.Errors)
+            continue
+        }
+
+        if (@($Selection.Gone).Count -gt 0) {
+            Write-Log "These marked apps are no longer in Intune and will be skipped:" 'WARNING'
+            foreach ($Gone in @($Selection.Gone)) { Write-Log ("     {0} ({1})" -f $Gone.DisplayName, $Gone.AppId) 'WARNING' }
+            Write-Log ""
+        }
+
+        if (@($Selection.Selected).Count -eq 0) {
+            Write-Log "No apps are marked for deletion." 'WARNING'
+            $LastProblems = @('No apps are marked for deletion. Tick Delete on the apps to remove, or press Cancel.')
+            continue
+        }
+
+        break
+    }
+
+    $ToDelete = @($Selection.Selected)
+
+    Clear
+    Write-Log "==========================================================================================="
+    Write-Log "CONFIRM - nothing has been deleted yet"
+    Write-Log "==========================================================================================="
+    Write-Log ""
+    foreach ($App in $ToDelete) { Write-Log ("     {0}  ({1})" -f $App.DisplayName, $App.AppId) }
+    Write-Log ""
+    Write-Log ("{0} app(s) will be backed up and then DELETED from Intune. Devices keep their printers." -f $ToDelete.Count) 'WARNING'
+    Write-Log ""
+
+    $Typed = ([string](Read-Host ("Type {0} (the number of apps) to delete them, or anything else to cancel" -f $ToDelete.Count))).Trim()
+    if ($Typed -ne [string]$ToDelete.Count) { Write-Log "Cancelled. Nothing was deleted." 'WARNING'; Pause; return }
+
+    $BackupFolder = Join-Path $RunFolder 'backups'
+    Write-Log ""
+
+    $Results = @(Invoke-PDPrinterBulkDelete -Apps $ToDelete -BackupFolder $BackupFolder -AuthContext $AuthContext `
+        -OnProgress {
+            param($Index, $Total, $Row)
+            $Level = 'SUCCESS'
+            if (@('Deleted', 'AlreadyGone') -notcontains $Row.Result) { $Level = 'ERROR' }
+            Write-Log ("[{0}/{1}] {2} ... {3}" -f $Index, $Total, $Row.DisplayName, $Row.Result) $Level
+        })
+
+    $ResultsPath = Join-Path $RunFolder 'delete-results.csv'
+    Write-PDBulkCsv -Rows $Results -Columns $script:PDBulk.DeleteResultColumns -Path $ResultsPath
+
+    Write-Log ""
+    Write-Log "==========================================================================================="
+    Write-Log "BULK DELETE FINISHED"
+    Write-Log "==========================================================================================="
+    foreach ($Outcome in @('Deleted', 'AlreadyGone', 'BackupFailed', 'DeleteFailed')) {
+        $Count = @($Results | Where-Object { $_.Result -eq $Outcome }).Count
+        if ($Count -gt 0) { Write-Log (" {0,-14} {1}" -f $Outcome, $Count) }
+    }
+    $Failed = @($Results | Where-Object { @('Deleted', 'AlreadyGone') -notcontains $_.Result })
+    if ($Failed.Count -gt 0) {
+        Write-Log ""
+        foreach ($Row in $Failed) { Write-Log ("     {0}: {1}" -f $Row.DisplayName, $Row.Error) 'ERROR' }
+    }
+    Write-Log ""
+    Write-Log "Results:"
+    Write-LogBlock "`n$ResultsPath`n"
+    Write-Log "Backups (one JSON file per app, including its group assignments):"
+    Write-LogBlock "`n$BackupFolder`n"
+    Pause
+}
+
 
 # DONE (still need testing) 1/14/26
 Function WindowsApp--InTune-Setup{
@@ -5084,97 +5757,9 @@ Function Invoke-GraphUploadRemoveCredential {
 # functions use arrives as a parameter (no wizard variables are read), none of them calls exit, and
 # every failure returns $false so the caller falls through to the guided walkthrough.
 
-Function Test-IntuneFieldMissing {
-    param([AllowNull()][object]$Value)
-
-    # Null, whitespace and the N/A placeholder all mean "not supplied" (spec 4.1 / 4.3).
-    $Text = [string]$Value
-    return ([string]::IsNullOrWhiteSpace($Text) -or ($Text.Trim() -eq 'N/A'))
-}
-
-Function ConvertTo-IntuneFieldText {
-    param([AllowNull()][object]$Value)
-
-    if (Test-IntuneFieldMissing -Value $Value) { return 'N/A' }
-    return [string]$Value
-}
-
-Function Get-IntuneDisplayUrl {
-    param([AllowNull()][string]$Url)
-
-    # Display/Notes only. The real $RepoUrl used to build commands is never changed (spec 12.1).
-    if ([string]::IsNullOrWhiteSpace($Url)) { return 'N/A' }
-
-    if (Get-Command -Name 'Remove-UrlCredential' -CommandType Function -ErrorAction SilentlyContinue) {
-        return (Remove-UrlCredential -Url $Url)
-    }
-
-    # Helper library not loaded: still never print user:token@ into a description.
-    return ($Url -replace '(?i)^(https?://)[^/@\s]+@', '$1')
-}
-
-Function New-IntunePrinterDescription {
-    param(
-        [AllowNull()][object]$Department,
-        [AllowNull()][object]$Location,
-        [AllowNull()][object]$Model,
-        [AllowNull()][object]$Asset,
-        [AllowNull()][object]$PrinterIP
-    )
-
-    # Always all five labels, in this order, each N/A on its own (spec 4.2).
-    $Lines = @(
-        ('Department: {0}' -f (ConvertTo-IntuneFieldText -Value $Department)),
-        ('Location: {0}'   -f (ConvertTo-IntuneFieldText -Value $Location)),
-        ('Model: {0}'      -f (ConvertTo-IntuneFieldText -Value $Model)),
-        ('Asset: {0}'      -f (ConvertTo-IntuneFieldText -Value $Asset)),
-        ('PrinterIP: {0}'  -f (ConvertTo-IntuneFieldText -Value $PrinterIP))
-    )
-
-    return ($Lines -join "`r`n")
-}
-
-Function New-IntuneTechnicalNotes {
-    param(
-        [AllowNull()][System.Collections.Specialized.OrderedDictionary]$AppFields,
-        [AllowNull()][string]$TargetRepo,
-        [AllowNull()][string]$TargetBranch,
-        [AllowNull()][string]$SourceCommit,
-        [AllowNull()][object]$Verified,
-        [AllowNull()][string]$SourceRepoRoot
-    )
-
-    # The source repo/branch are read from the repo that built the package, not from whatever
-    # directory Setup was started in (spec I03).
-    $SourceRepo   = $null
-    $SourceBranch = $null
-
-    if (-not [string]::IsNullOrWhiteSpace($SourceRepoRoot)) {
-        try { $SourceRepo   = [string](git -C $SourceRepoRoot remote get-url origin 2>$null) } Catch { $SourceRepo = $null }
-        try { $SourceBranch = [string](git -C $SourceRepoRoot rev-parse --abbrev-ref HEAD 2>$null) } Catch { $SourceBranch = $null }
-    }
-
-    $Lines = @()
-
-    if ($null -ne $AppFields) {
-        # Labelled like the POWERDEPLOY DATA block below, so neither section reads as stray data.
-        $Lines += 'INSTALLER DATA'
-        foreach ($Key in $AppFields.Keys) {
-            $Lines += ('{0}: {1}' -f $Key, (ConvertTo-IntuneFieldText -Value $AppFields[$Key]))
-        }
-        $Lines += ''
-    }
-
-    $Lines += 'POWERDEPLOY DATA'
-    $Lines += ('Target Repo: {0}'   -f (Get-IntuneDisplayUrl -Url $TargetRepo))
-    $Lines += ('Target Branch: {0}' -f (ConvertTo-IntuneFieldText -Value $TargetBranch))
-    $Lines += ('Source Repo: {0}'   -f (Get-IntuneDisplayUrl -Url $SourceRepo))
-    $Lines += ('Source Branch: {0}' -f (ConvertTo-IntuneFieldText -Value $SourceBranch))
-    $Lines += ('Source Commit: {0}' -f (ConvertTo-IntuneFieldText -Value $SourceCommit))
-    $Lines += ('Verified: {0}'      -f (ConvertTo-IntuneFieldText -Value $Verified))
-
-    return ($Lines -join "`r`n")
-}
+# Test-IntuneFieldMissing, ConvertTo-IntuneFieldText, Get-IntuneDisplayUrl, New-IntunePrinterDescription
+# and New-IntuneTechnicalNotes live in Other_Tools\Printer-Intune_Helpers.ps1 (dot-sourced above), shared
+# with the bulk printer tools.
 
 Function Complete-IntuneManualNotes {
     param([AllowNull()][string]$Notes)

@@ -49,7 +49,12 @@ $featureFiles = @(
     'Tests\IntuneGraphUpload.Tests.ps1',
     'Tests\Check-PDCompatibility.ps1',
     'Tests\Fixtures\IntuneGraph\New-PDIntuneWinFixture.ps1',
-    'Setup.ps1'
+    'Setup.ps1',
+    # Bulk printer tools (printer-bulk-tools.buildplan.md)
+    'Other_Tools\Printer-Intune_Helpers.ps1',
+    'Other_Tools\Printer-IntuneBulk.ps1',
+    'Other_Tools\CsvGrid-Editor_Helpers.ps1',
+    'Tests\PrinterIntuneBulk.Tests.ps1'
 )
 
 # Joined by M7 (duplicate-printer guard); until then its pre-existing bytes warn instead of failing.
