@@ -1578,6 +1578,7 @@ Function Printer--InTune-BulkCreate {
             $Detail = ''
             if ($Result.NewAppId) { $Detail = " (new app $($Result.NewAppId)" + $(if ($Result.DeletedAppIds) { ", replaced $($Result.DeletedAppIds))" } else { ')' }) }
             if ([int]("0" + $Result.Attempts) -gt 1) { $Detail += " [attempt $($Result.Attempts)]" }
+            if (([int]("0" + $Result.StorageRenewals) -gt 0) -or ([int]("0" + $Result.StorageWaits) -gt 0)) { $Detail += " [storage: $($Result.StorageRenewals) renewal(s), $($Result.StorageWaits) wait(s)]" }
             if ($Result.Result -ne 'Created' -and $Result.Result -ne 'Overridden' -and $Result.Error) { $Detail += ": $($Result.Error)" }
             Write-Log ("[{0}/{1}] {2} ... {3}{4}" -f $Index, $Total, $Result.IntuneDisplayName, $Result.Result, $Detail) $Level
         } `

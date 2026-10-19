@@ -739,7 +739,7 @@ Add-TestCase 'B64' 'a failed upload that left nothing behind is retried; preflig
             $script:Uploads += [pscustomobject]@{ DisplayName = $DisplayName; AllowDuplicateName = [bool]$AllowDuplicateName; Attempt = $n }
             $plan = @($script:AttemptPlan[$DisplayName]); $outcome = $plan[[math]::Min($n, $plan.Count) - 1]
             switch ($outcome) {
-                'ok'        { return [pscustomobject]@{ Success = $true;  Stage = 'Done';          Message = 'ok';    CleanupStatus = 'NotNeeded'; AppId = 'new-' + $n } }
+                'ok'        { return [pscustomobject]@{ Success = $true;  Stage = 'Done';          Message = 'ok';    CleanupStatus = 'NotNeeded'; AppId = 'new-' + $n; StorageRenewals = 1; StorageAccessWaits = 2 } }
                 'content'   { return [pscustomobject]@{ Success = $false; Stage = 'CommitFile';    Message = 'commitFileFailed'; CleanupStatus = 'Deleted'; AppId = 'tmp' } }
                 'preflight' { return [pscustomobject]@{ Success = $false; Stage = 'Preflight';     Message = 'bad group'; CleanupStatus = 'NotNeeded'; AppId = $null } }
                 'leftover'  { return [pscustomobject]@{ Success = $false; Stage = 'ContentUpload'; Message = 'boom';  CleanupStatus = 'Failed'; AppId = 'left-1' } }
@@ -754,6 +754,9 @@ Add-TestCase 'B64' 'a failed upload that left nothing behind is retried; preflig
 
         Assert-Equal 'Created' $by['Alpha-Lobby'].Result 'a transient content failure is retried and succeeds'
         Assert-Equal '2' $by['Alpha-Lobby'].Attempts 'on the second attempt'
+        Assert-Equal '1' $by['Alpha-Lobby'].StorageRenewals 'the final attempt''s storage renewals reach the results'
+        Assert-Equal '2' $by['Alpha-Lobby'].StorageWaits 'and its storage waits'
+        Assert-Equal '0' $by['Zulu-Copier'].StorageRenewals 'an upload that never reported counts shows 0'
         Assert-Like '*Succeeded on attempt 2 after: attempt 1: stage CommitFile: commitFileFailed*' $by['Alpha-Lobby'].Error 'the earlier failure is kept for the record'
         Assert-Equal 'False,True' ((@($script:Uploads | Where-Object { $_.DisplayName -eq 'PRINTER: Alpha-Lobby' }) | ForEach-Object { $_.AllowDuplicateName }) -join ',') 'only the retry may share the deleted attempt''s name'
 

@@ -314,7 +314,11 @@ function New-PDIntuneUploadResult {
         [AllowNull()][object]$Preflight,
         [string]$CleanupStatus = 'NotNeeded',
         [AllowNull()][DateTimeOffset]$SecretExpiresOn = [DateTimeOffset]::MinValue,
-        [AllowNull()][string]$NotesTimestampNote
+        [AllowNull()][string]$NotesTimestampNote,
+        # Content-upload storage renewals and waits for a new storage URI (0 when the upload never
+        # reached that stage). Counts only: no SAS, no URI.
+        [int]$StorageRenewals = 0,
+        [int]$StorageAccessWaits = 0
     )
 
     $resolvedGroups  = @()
@@ -365,6 +369,8 @@ function New-PDIntuneUploadResult {
         CleanupStatus   = $CleanupStatus
         Message         = [string]$Message
         InputHashes     = $inputHashes
+        StorageRenewals    = [int]$StorageRenewals
+        StorageAccessWaits = [int]$StorageAccessWaits
     }
 }
 
@@ -890,6 +896,10 @@ function Invoke-PDIntuneUploadWriteStages {
     $cleanup   = 'NotNeeded'
     $stage     = 'CreateApp'
     $failure   = $null
+    # Storage renewals and waits, returned in the result: a dot-sourced caller (Setup, the bulk
+    # tools) keeps no uploader log, so this is the only place they can see them. Renewals are
+    # counted as they are requested, so a renewal that then fails is still counted.
+    $storageStats = @{ Renewals = 0; AccessWaits = 0 }
 
     $appDisplayName = [string]$Preflight.DisplayNameValue
     $knownAppIds    = @{}
@@ -923,6 +933,8 @@ function Invoke-PDIntuneUploadWriteStages {
             CleanupStatus = $Cleanup
             Warnings    = @($allWarnings)
             DurationSec = [int]([DateTime]::UtcNow - $started).TotalSeconds
+            StorageRenewals    = [int]$storageStats.Renewals
+            StorageAccessWaits = [int]$storageStats.AccessWaits
         }
     }
 
@@ -1023,6 +1035,8 @@ function Invoke-PDIntuneUploadWriteStages {
             try { $sasWindow = Get-PDStorageSasSummary -Target $Info['Target'] } catch { }
             Write-PDUploadLog -Message ("The content file storage URI needs renewing {0}." -f $reason) -Level 'WARNING'
             Write-PDUploadLog -Message ("Storage URI being renewed: {0}." -f $sasWindow) -Level 'WARNING'
+            $storageStats.Renewals = [int]$storageStats.Renewals + 1
+            if (($null -ne $Info) -and ([int]$Info['Waits'] -gt [int]$storageStats.AccessWaits)) { $storageStats.AccessWaits = [int]$Info['Waits'] }
 
             # No request body: Microsoft documents renewUpload as "Do not supply a request body",
             # and the service rejects the body that used to be sent (see RenewUploadBody).
@@ -1069,6 +1083,8 @@ function Invoke-PDIntuneUploadWriteStages {
                                            -FilePath ([string]$package.PayloadPath) `
                                            -WhenExpiring $getFreshTarget -Stage $stage
         Write-PDUploadLog -Message ("Uploaded {0} block(s), {1} byte(s), {2} renewal(s), {3} wait(s) for a new storage URI to start accepting blocks." -f $upload.Blocks, $upload.Bytes, $upload.Renewals, [int]$upload.AccessWaits)
+        $storageStats.Renewals    = [int]$upload.Renewals
+        $storageStats.AccessWaits = [int]$upload.AccessWaits
 
         # --- 6. Commit ------------------------------------------------------------------
         $stage = 'Commit'
@@ -1390,6 +1406,8 @@ function Invoke-PDIntuneUpload {
             Preflight     = $preflight
             CleanupStatus = [string]$upload.CleanupStatus
             Message       = [string]$upload.Message
+            StorageRenewals    = [int]$upload.StorageRenewals
+            StorageAccessWaits = [int]$upload.StorageAccessWaits
         }
         if ($upload.Success) { $resultArguments['Success'] = [switch]::Present }
         if (-not [string]::IsNullOrWhiteSpace($createdAppId)) { $resultArguments['AppId'] = $createdAppId }

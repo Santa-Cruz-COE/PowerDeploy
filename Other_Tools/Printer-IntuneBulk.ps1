@@ -43,7 +43,7 @@ $script:PDBulk = @{
     # installer will use (the PresetDriver's values when one is set).
     ReferenceColumns = @('Department', 'Location', 'Model', 'Asset', 'PrinterIP', 'PortName', 'PresetDriver', 'DriverName', 'INFFile', 'DriverZip', 'Verified', 'Publisher')
     StagedColumns  = @('Include', 'PrinterName', 'IntuneDisplayName', 'RequiredGroups', 'AvailableGroups', 'Department', 'Location', 'PrinterIP', 'Problem', 'Action', 'ExistingAppIds', 'ExistingDisplayNames')
-    ResultColumns  = @('Include', 'PrinterName', 'IntuneDisplayName', 'RequiredGroups', 'AvailableGroups', 'Department', 'Location', 'PrinterIP', 'Problem', 'Action', 'Result', 'Attempts', 'NewAppId', 'DeletedAppIds', 'BackupFiles', 'Error')
+    ResultColumns  = @('Include', 'PrinterName', 'IntuneDisplayName', 'RequiredGroups', 'AvailableGroups', 'Department', 'Location', 'PrinterIP', 'Problem', 'Action', 'Result', 'Attempts', 'StorageRenewals', 'StorageWaits', 'NewAppId', 'DeletedAppIds', 'BackupFiles', 'Error')
 
     # Bulk delete. Only Delete is the operator's; rows are matched by AppId alone.
     DeleteColumns       = @('Delete', 'DisplayName', 'PrinterName', 'DeployMode', 'Version', 'Created', 'AppId')
@@ -821,6 +821,12 @@ function Invoke-PDPrinterBulkCreate {
             if ($retryDelay -gt 0) { Start-Sleep -Seconds ($retryDelay * $attempt) }
         }
         $result['Attempts'] = [string]$attempt
+        # The final attempt's storage renewals / waits for a new storage URI (the uploader's own log
+        # is silent when dot-sourced, so this is where they become visible).
+        if ($null -ne $upload) {
+            $result['StorageRenewals'] = [string][int]$upload.StorageRenewals
+            $result['StorageWaits']    = [string][int]$upload.StorageAccessWaits
+        }
 
         if ($null -eq $upload -or -not $upload.Success) {
             $message = '(the uploader returned nothing; check Intune for this printer before retrying)'

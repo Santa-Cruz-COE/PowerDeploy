@@ -3013,6 +3013,9 @@ Add-TestCase 'U03a' 'An expired storage URI is renewed before anything is upload
     # this used to send (HTTP 400, unexpected 'odata.type' annotation; 2026-10-19).
     $renewCall = @(@($script:MockGraphCalls) | Where-Object { (($_.Method -eq 'Post') -and ($_.Uri -like '*microsoft.graph.renewUpload')) })[0]
     Assert-True (($null -eq $renewCall.BodyBytes) -or (@($renewCall.BodyBytes).Count -eq 0)) 'renewUpload is posted with no request body'
+    # The counts reach the caller's result object (a dot-sourced caller keeps no uploader log).
+    Assert-Equal 1 ([int]$result.StorageRenewals) 'the result reports the one renewal'
+    Assert-Equal 0 ([int]$result.StorageAccessWaits) 'and no waits'
 
     $blockRequests = @(@($script:M4.StorageRequests) | Where-Object { ([string]$_.Uri) -like '*comp=block&*' })
     Assert-True $blockRequests.Count -ge 1 'blocks were uploaded'
@@ -3048,6 +3051,7 @@ Add-TestCase 'U03b' 'A storage refusal mid-upload renews once and restarts the b
 
     Assert-Equal $true $result.Success ('the upload recovered from the refusal; message: ' + $result.Message)
     Assert-Equal 1 ([int]$script:M4.RenewCount) 'one renewal for one refusal'
+    Assert-Equal 1 ([int]$result.StorageRenewals) 'the result reports the renewal'
     Assert-True ([bool]$script:M4.Committed) 'the block list was still sent'
     Assert-True ([int]$script:M4StorageHits -ge 2) 'the refused block was retried against the new URI'
     $toOriginal = @(@($script:M4.StorageRequests) | Where-Object { (([string]$_.Uri) -like '*comp=block&*') -and (([string]$_.Uri) -like '*sig=sig-original*') })
@@ -3085,6 +3089,8 @@ Add-TestCase 'U03e' 'A fresh storage URI that refuses its first block with 403 i
     foreach ($call in $blocks) { Assert-Like '*sig=sig-original*' ([string]$call.Uri) 'every attempt used the original URI' }
     Assert-True ([bool]$script:M4.Committed) 'the block list was sent'
     Assert-Equal 0 @($script:M4.Deleted).Count 'nothing was rolled back'
+    Assert-Equal 0 ([int]$result.StorageRenewals) 'the result reports no renewal'
+    Assert-Equal 2 ([int]$result.StorageAccessWaits) 'and the two waits'
     Clear-PDMockGraph
 }
 
@@ -3159,6 +3165,8 @@ Add-TestCase 'U03h' 'A failed renewal names the uploadState, why it renewed, and
     Assert-NotLike '*sig-original*' $result.Message 'never the signature'
     Assert-NotLike '*sig=*' $result.Message 'never any signature'
     Assert-Equal 1 @($script:M4.Deleted).Count 'the app is still rolled back'
+    Assert-Equal 1 ([int]$result.StorageRenewals) 'a renewal that failed is still counted'
+    Assert-Equal @($script:PDGraph.StorageAccessRetryDelaysSec).Count ([int]$result.StorageAccessWaits) 'with the waits before it'
     Clear-PDMockGraph
 }
 
