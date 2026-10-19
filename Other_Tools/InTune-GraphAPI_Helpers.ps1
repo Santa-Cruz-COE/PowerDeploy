@@ -81,6 +81,7 @@ if (-not $script:PDGraph) {
         MaxStorageRenewals      = 3      # renewals allowed for one content file
         StorageBlockIdWidth     = 6      # Azure requires every block id in a blob to be the same length
         StorageRenewCheckBlocks = 20     # how often the SAS expiry is re-checked during an upload
+        StorageAccessRetryDelaysSec = @(5, 10, 15, 15)  # waits before renewing a FRESH SAS whose first block got 403 (Azure: a stored access policy can take up to 30 s to take effect)
 
         # --- Win32 content workflow shapes (spec 10.3) ---
         Win32AppCast      = 'microsoft.graph.win32LobApp'
@@ -2856,7 +2857,10 @@ function Get-PDStorageUploadTarget {
         never log it or return it in an object that leaves the process.
 
         .OUTPUTS
-        @{ Base; Query; Host; Path; ExpiresOn (DateTimeOffset or $null); SasExpiresAtText }
+        @{ Base; Query; Host; Path; ExpiresOn (DateTimeOffset or $null); SasExpiresAtText;
+           SasStartsAtText; HasPolicyId }
+        The last two are diagnostics only (Get-PDStorageSasSummary): the raw 'st' value and
+        whether the SAS names a stored access policy ('si').
     #>
     param(
         [Parameter(Mandatory = $true)][AllowEmptyString()][string]$AzureStorageUri,
@@ -2899,10 +2903,18 @@ function Get-PDStorageUploadTarget {
 
     $expiresOn   = $null
     $expiresText = $null
+    $startsText  = $null
+    $hasPolicyId = $false
     foreach ($pair in ($query -split '&')) {
         $parts = $pair -split '=', 2
         if (($parts.Count -eq 2) -and ($parts[0] -ieq 'se')) {
             $expiresText = [System.Uri]::UnescapeDataString($parts[1])
+        }
+        if (($parts.Count -eq 2) -and ($parts[0] -ieq 'st')) {
+            $startsText = [System.Uri]::UnescapeDataString($parts[1])
+        }
+        if (($parts.Count -eq 2) -and ($parts[0] -ieq 'si')) {
+            $hasPolicyId = $true
         }
     }
     if (-not [string]::IsNullOrWhiteSpace($expiresText)) {
@@ -2923,6 +2935,8 @@ function Get-PDStorageUploadTarget {
         Path             = $parsed.AbsolutePath
         ExpiresOn        = $expiresOn
         SasExpiresAtText = $expiresText
+        SasStartsAtText  = $startsText
+        HasPolicyId      = [bool]$hasPolicyId
     }
 }
 
@@ -2951,6 +2965,41 @@ function Test-PDStorageUriExpiring {
     elseif ($Now -is [DateTime]) { $moment = [DateTimeOffset]::new(([DateTime]$Now).ToUniversalTime()) }
 
     return ($moment -ge $Target['ExpiresOn'].AddSeconds(-1 * [double]$MarginSec))
+}
+
+function Get-PDStorageSasSummary {
+    <#
+        .SYNOPSIS
+        One log-safe line describing a storage target's SAS validity window.
+
+        .DESCRIPTION
+        For diagnosing why a storage URI was renewed (2026-10-19 bulk runs): the raw 'st' and
+        'se' values, the seconds left before expiry against this machine's UTC clock, and
+        whether a stored access policy ('si') is named. Never the signature or any other
+        query value, so the line can go to a log or an error message.
+    #>
+    param(
+        [AllowNull()][hashtable]$Target,
+        [AllowNull()][object]$Now
+    )
+
+    if ($null -eq $Target) { return 'no storage target' }
+
+    $moment = [DateTimeOffset]::UtcNow
+    if ($Now -is [DateTimeOffset]) { $moment = $Now }
+    elseif ($Now -is [DateTime]) { $moment = [DateTimeOffset]::new(([DateTime]$Now).ToUniversalTime()) }
+
+    $startText  = 'none'
+    $expiryText = 'none'
+    $left       = 'unknown'
+    $policy     = 'no'
+    if (-not [string]::IsNullOrWhiteSpace([string]$Target['SasStartsAtText']))  { $startText  = [string]$Target['SasStartsAtText'] }
+    if (-not [string]::IsNullOrWhiteSpace([string]$Target['SasExpiresAtText'])) { $expiryText = [string]$Target['SasExpiresAtText'] }
+    if ($Target['ExpiresOn'] -is [DateTimeOffset]) { $left = [string][int][math]::Floor(($Target['ExpiresOn'] - $moment).TotalSeconds) }
+    if ([bool]$Target['HasPolicyId']) { $policy = 'yes' }
+
+    return ("SAS st={0} se={1} (expires in {2} s), stored access policy: {3}; now {4} UTC" -f `
+            $startText, $expiryText, $left, $policy, $moment.UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture))
 }
 
 function New-PDStorageBlockId {
@@ -3370,13 +3419,24 @@ function Send-PDIntuneContentBlob {
         back a different container, and uncommitted blocks are only meaningful in the
         container they were written to.
 
+        A 403 on the FIRST block of a URI that is not expiring is first retried against the
+        same URI after each wait in StorageAccessRetryDelaysSec, and only then renewed: Azure
+        documents that a new stored access policy can take up to 30 seconds to take effect and
+        answers 403 until it does. In the 2026-10-19 bulk runs 19 of 31 back-to-back uploads
+        asked for a renewal within seconds of receiving their URI, every one of those renewals
+        ended in a terminal Intune failure, and the same upload about 20 seconds later always
+        succeeded - which is what that propagation window looks like. Once a block has been
+        accepted, a 403 means the signature really stopped working, so it is renewed at once
+        as before.
+
         .PARAMETER WhenExpiring
         Optional callback invoked when a fresh URI is needed. It receives
-        @{ Reason; Target; Attempt } and must return a target hashtable from
-        Get-PDStorageUploadTarget. Without it an expired URI is a plain failure.
+        @{ Reason; Target; Attempt } (plus Status, Detail and Waits when Reason is 'rejected')
+        and must return a target hashtable from Get-PDStorageUploadTarget. Without it an
+        expired URI is a plain failure.
 
         .OUTPUTS
-        @{ Blocks; Bytes; BlockIds; Renewals }
+        @{ Blocks; Bytes; BlockIds; Renewals; AccessWaits }
     #>
     param(
         [Parameter(Mandatory = $true)][AllowNull()][hashtable]$Target,
@@ -3404,6 +3464,9 @@ function Send-PDIntuneContentBlob {
     $current      = $Target
     $buffer       = New-Object byte[] $BlockBytes
     $keptIds      = @()
+    $accessDelays = @($script:PDGraph.StorageAccessRetryDelaysSec)
+    $accessWaits  = 0
+    $targetWaits  = 0
 
     try {
         while ($true) {
@@ -3422,6 +3485,7 @@ function Send-PDIntuneContentBlob {
                 }
                 $current = & $WhenExpiring @{ Reason = 'expiring'; Target = $current; Attempt = $renewals }
                 $keptIds = @()
+                $targetWaits = 0
                 continue
             }
 
@@ -3477,9 +3541,28 @@ function Send-PDIntuneContentBlob {
                         # is the problem; anything else is a real failure of this block.
                         $looksExpired = (($info.Status -eq 401) -or ($info.Status -eq 403) -or ($info.Status -eq 410))
 
+                        # A fresh SAS whose stored access policy has not taken effect yet answers
+                        # 403 (see .DESCRIPTION): wait and resend this same block to the same URI
+                        # before asking Intune for a new one.
+                        if (($info.Status -eq 403) -and (@($keptIds).Count -eq 0) -and
+                            ($targetWaits -lt @($accessDelays).Count) -and
+                            (-not (Test-PDStorageUriExpiring -Target $current))) {
+                            $pause = [double]$accessDelays[$targetWaits]
+                            $targetWaits++
+                            $accessWaits++
+                            if ($pause -gt 0) { Start-Sleep -Milliseconds ([int]($pause * 1000)) }
+                            $index--
+                            continue
+                        }
+
                         if ($looksExpired -and ($null -ne $WhenExpiring) -and (($renewals + 1) -le $maxRenewals)) {
                             $renewals++
-                            $current = & $WhenExpiring @{ Reason = 'rejected'; Target = $current; Attempt = $renewals; Status = $info.Status }
+                            $current = & $WhenExpiring @{ Reason = 'rejected'; Target = $current; Attempt = $renewals; Status = $info.Status; Detail = $info.Detail; Waits = $targetWaits }
+                            $targetWaits = 0
+                            # The restart sends every block again to the new URI, so the ids kept
+                            # for the old one go (as on the 'expiring' path). Without this a refusal
+                            # after the first block failed with "Only N+1 of N blocks were accepted".
+                            $keptIds = @()
                             $restart = $true
                             break
                         }
@@ -3512,6 +3595,7 @@ function Send-PDIntuneContentBlob {
             Bytes    = [long]$totalBytes
             BlockIds = @($keptIds)
             Renewals = [int]$renewals
+            AccessWaits = [int]$accessWaits
         }
     } finally {
         $buffer = $null

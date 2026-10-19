@@ -197,6 +197,9 @@ Add-TestCase 'M2-01' 'Dot-sourcing the library is silent and has no side effects
 
 . $HelperPath
 
+# The M4 scenarios zero the storage access waits so the suite stays fast; U03j checks what ships.
+$script:PDShippedAccessDelays = @($script:PDGraph.StorageAccessRetryDelaysSec)
+
 Add-TestCase 'M2-01b' 'Every documented entry point is defined after import' {
     foreach ($required in @('Get-PDGraphCredential', 'Save-PDGraphCredential', 'Remove-PDGraphCredential',
                             'Get-PDGraphCredentialPath', 'New-PDGraphCredentialObject',
@@ -2382,6 +2385,9 @@ function Reset-PDM4Scenario {
     # means "fail if the first check is not already satisfied".
     $script:PDGraph.PollIntervalMs = 0
     $script:PDGraph.PollDeadlineSec = $PollDeadlineSec
+    # Same for the waits before renewing a fresh SAS that refuses its first block: the number of
+    # waits is kept, their length is not.
+    $script:PDGraph.StorageAccessRetryDelaysSec = @(0, 0, 0, 0)
 
     Set-PDMockGraph -Router {
         param($Request)
@@ -3025,7 +3031,9 @@ Add-TestCase 'U03b' 'A storage refusal mid-upload renews once and restarts the b
         $script:M4StorageHits = [int]$script:M4StorageHits + 1
         $uri = [string]$Request.Uri
 
-        if (($uri -like '*comp=block&*') -and ($script:M4StorageHits -eq 1)) {
+        # The original SAS refuses EVERY block (it really stopped working). Refusing it only once
+        # would now be waited out instead of renewed - that case is U03e.
+        if (($uri -like '*comp=block&*') -and ($uri -like '*sig=sig-original*')) {
             # Azure answers an expired SAS with 403 AuthorizationExpired.
             return (New-PDMockJsonResponse -Status 403 -Json (@{ error = @{ code = 'AuthenticationFailed'; message = 'Server failed to authenticate the request.' } } | ConvertTo-Json -Compress))
         }
@@ -3042,7 +3050,144 @@ Add-TestCase 'U03b' 'A storage refusal mid-upload renews once and restarts the b
     Assert-Equal 1 ([int]$script:M4.RenewCount) 'one renewal for one refusal'
     Assert-True ([bool]$script:M4.Committed) 'the block list was still sent'
     Assert-True ([int]$script:M4StorageHits -ge 2) 'the refused block was retried against the new URI'
+    $toOriginal = @(@($script:M4.StorageRequests) | Where-Object { (([string]$_.Uri) -like '*comp=block&*') -and (([string]$_.Uri) -like '*sig=sig-original*') })
+    Assert-Equal (1 + @($script:PDGraph.StorageAccessRetryDelaysSec).Count) $toOriginal.Count 'the first block went to the original URI once plus once per configured wait, then no more'
     Clear-PDMockGraph
+}
+
+Add-TestCase 'U03e' 'A fresh storage URI that refuses its first block with 403 is waited out, not renewed' {
+    # Azure: a new stored access policy can take up to 30 s to take effect and answers 403 until it
+    # does. 2026-10-19: renewing in that window ended in a terminal Intune failure (19 of 31).
+    $script:M4StorageHits = 0
+    $storage = {
+        param($Request, $State)
+
+        $script:M4StorageHits = [int]$script:M4StorageHits + 1
+        $uri = [string]$Request.Uri
+
+        if (($uri -like '*comp=block&*') -and ($script:M4StorageHits -le 2)) {
+            return (New-PDMockJsonResponse -Status 403 -Json (@{ error = @{ code = 'AuthenticationFailed'; message = 'Server failed to authenticate the request.' } } | ConvertTo-Json -Compress))
+        }
+        if ($uri -like '*comp=blocklist*') { $State.Committed = $true }
+        return (New-PDMockJsonResponse -Status 201)
+    }
+
+    Reset-PDM4Scenario -Storage $storage
+
+    $inputs = New-PDM4InputSet -Case 'u03e'
+    $result = Invoke-PDM4Upload -Inputs $inputs
+
+    Assert-Equal $true $result.Success ('the upload finished on the same URI; message: ' + $result.Message)
+    Assert-Equal 0 ([int]$script:M4.RenewCount) 'no renewal was asked for'
+    Assert-Equal 0 @(@($script:MockGraphCalls) | Where-Object { (($_.Method -eq 'Post') -and ($_.Uri -like '*microsoft.graph.renewUpload')) }).Count 'renewUpload was never posted'
+    $blocks = @(@($script:M4.StorageRequests) | Where-Object { ([string]$_.Uri) -like '*comp=block&*' })
+    Assert-Equal 3 $blocks.Count 'two refusals, then the same block accepted'
+    foreach ($call in $blocks) { Assert-Like '*sig=sig-original*' ([string]$call.Uri) 'every attempt used the original URI' }
+    Assert-True ([bool]$script:M4.Committed) 'the block list was sent'
+    Assert-Equal 0 @($script:M4.Deleted).Count 'nothing was rolled back'
+    Clear-PDMockGraph
+}
+
+Add-TestCase 'U03f' 'A 403 after a block was accepted renews at once, without waiting' {
+    $payload = Join-Path $tempRoot 'u03f-payload.bin'
+    [System.IO.File]::WriteAllBytes($payload, [byte[]](1..40))
+
+    $script:M4F = @{ Original = 0; Renewed = 0; Calls = @() }
+    Set-PDMockGraph -Router {
+        param($Request)
+        $uri = [string]$Request.Uri
+        if ($uri -like '*sig=sig-original*') {
+            $script:M4F.Original = [int]$script:M4F.Original + 1
+            # Block 1 is accepted, block 2 is refused: the signature stopped working mid-upload.
+            if ([int]$script:M4F.Original -eq 2) {
+                return (New-PDMockJsonResponse -Status 403 -Json (@{ error = @{ code = 'AuthenticationFailed'; message = 'Server failed to authenticate the request.' } } | ConvertTo-Json -Compress))
+            }
+            return (New-PDMockJsonResponse -Status 201)
+        }
+        $script:M4F.Renewed = [int]$script:M4F.Renewed + 1
+        return (New-PDMockJsonResponse -Status 201)
+    }
+    $previousDelays = $script:PDGraph.StorageAccessRetryDelaysSec
+    $script:PDGraph.StorageAccessRetryDelaysSec = @(0, 0, 0, 0)
+    try {
+        $sas    = 'https://pdintuneweb.blob.core.windows.net/content/x.bin?sv=1&sr=b&se=2099-01-01T00:00:00Z&sig='
+        $target = Get-PDStorageUploadTarget -AzureStorageUri ($sas + 'sig-original') -Stage 'Upload'
+        $renew  = {
+            param($Info)
+            $script:M4F.Calls += $Info
+            return (Get-PDStorageUploadTarget -AzureStorageUri ($sas + 'sig-renewed') -Stage 'Upload')
+        }
+
+        $upload = Send-PDIntuneContentBlob -Target $target -FilePath $payload -BlockBytes 16 -WhenExpiring $renew -Stage 'Upload'
+    } finally {
+        $script:PDGraph.StorageAccessRetryDelaysSec = $previousDelays
+        Clear-PDMockGraph
+    }
+
+    Assert-Equal 1 ([int]$upload.Renewals) 'one renewal'
+    Assert-Equal 0 ([int]$upload.AccessWaits) 'no wait: a block had already been accepted on that URI'
+    Assert-Equal 2 ([int]$script:M4F.Original) 'the original URI saw one accepted and one refused block, no resend'
+    Assert-Equal 4 ([int]$script:M4F.Renewed) 'three blocks and the block list went to the renewed URI'
+    Assert-Equal 1 @($script:M4F.Calls).Count 'the renewal callback ran once'
+    Assert-Equal 'rejected' ([string]@($script:M4F.Calls)[0]['Reason']) 'because the block was refused'
+    Assert-Equal 403 ([int]@($script:M4F.Calls)[0]['Status']) 'with the service status'
+    Assert-Equal 0 ([int]@($script:M4F.Calls)[0]['Waits']) 'and no waits before it'
+}
+
+Add-TestCase 'U03h' 'A failed renewal names the uploadState, why it renewed, and the SAS window - never the signature' {
+    $storage = {
+        param($Request, $State)
+        if (([string]$Request.Uri) -like '*comp=block&*') {
+            return (New-PDMockJsonResponse -Status 403 -Json (@{ error = @{ code = 'AuthenticationFailed'; message = 'Server failed to authenticate the request.' } } | ConvertTo-Json -Compress))
+        }
+        return (New-PDMockJsonResponse -Status 201)
+    }
+    Reset-PDM4Scenario -Storage $storage -FileQueue @(
+        (New-PDM4FileReady),
+        (New-PDM4FilePending -RenewalFailed))
+
+    $inputs = New-PDM4InputSet -Case 'u03h'
+    $result = Invoke-PDM4Upload -Inputs $inputs
+
+    Assert-Equal $false $result.Success 'a failed renewal is still a failure'
+    Assert-Equal 'Upload' $result.Stage 'in the upload stage'
+    Assert-Like '*renewing the content file storage URI*' $result.Message 'names what failed (unchanged wording)'
+    Assert-Like "*uploadState 'azureStorageUriRenewalFailed'*" $result.Message 'carries the service state'
+    Assert-Like '*refused a block with HTTP 403*' $result.Message 'carries the trigger'
+    Assert-Like ('*after {0} wait(s)*' -f @($script:PDGraph.StorageAccessRetryDelaysSec).Count) $result.Message 'and that it was waited out first'
+    Assert-Like '*se=2030-01-01T00:00:00Z*' $result.Message 'carries the SAS expiry'
+    Assert-NotLike '*sig-original*' $result.Message 'never the signature'
+    Assert-NotLike '*sig=*' $result.Message 'never any signature'
+    Assert-Equal 1 @($script:M4.Deleted).Count 'the app is still rolled back'
+    Clear-PDMockGraph
+}
+
+Add-TestCase 'U03i' 'The SAS summary reports st, se, time left and a stored access policy, and nothing secret' {
+    $now    = [DateTimeOffset]::new(2030, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
+    $target = Get-PDStorageUploadTarget -Stage 'Upload' -AzureStorageUri 'https://pdintuneweb.blob.core.windows.net/c/x.bin?sv=2021-08-06&st=2029-12-31T23%3A59%3A00Z&se=2030-01-01T00%3A01%3A00Z&sr=b&si=policy-1&sig=TOPSECRETSIG'
+    Assert-Equal '2029-12-31T23:59:00Z' ([string]$target.SasStartsAtText) 'st is kept as issued'
+    Assert-Equal $true ([bool]$target.HasPolicyId) 'si is noticed'
+
+    $line = Get-PDStorageSasSummary -Target $target -Now $now
+    Assert-Like '*st=2029-12-31T23:59:00Z*' $line 'start'
+    Assert-Like '*se=2030-01-01T00:01:00Z*' $line 'expiry'
+    Assert-Like '*expires in 60 s*' $line 'time left against the given clock'
+    Assert-Like '*stored access policy: yes*' $line 'policy'
+    Assert-Like '*now 2030-01-01T00:00:00Z UTC*' $line 'the clock it was measured against'
+    Assert-NotLike '*TOPSECRETSIG*' $line 'never the signature'
+    Assert-NotLike '*policy-1*' $line 'nor the policy id'
+
+    $bare = Get-PDStorageSasSummary -Target (Get-PDStorageUploadTarget -Stage 'Upload' -AzureStorageUri 'https://pdintuneweb.blob.core.windows.net/c/x.bin?sv=1&sig=abc')
+    Assert-Like '*st=none se=none (expires in unknown s), stored access policy: no*' $bare 'missing values are said plainly'
+    Assert-Equal 'no storage target' (Get-PDStorageSasSummary -Target $null) 'no target'
+}
+
+Add-TestCase 'U03j' 'The shipped waits cover the 30 s stored-access-policy window and stay bounded' {
+    $total = 0.0
+    foreach ($delay in @($script:PDShippedAccessDelays)) { $total += [double]$delay }
+    Assert-True (@($script:PDShippedAccessDelays).Count -ge 1) 'at least one wait ships'
+    Assert-True ($total -ge 30) ("the waits add up to at least Azure's documented 30 s (got {0})" -f $total)
+    Assert-True ($total -le 120) ("and stay well inside the poll deadline (got {0})" -f $total)
 }
 
 Add-TestCase 'U03c' 'A renewal that fails terminally stops the upload instead of looping' {

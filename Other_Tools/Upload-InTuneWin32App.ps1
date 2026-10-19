@@ -1014,8 +1014,15 @@ function Invoke-PDIntuneUploadWriteStages {
             $reason = 'before the upload could finish'
             if (($null -ne $Info) -and (([string]$Info['Reason']) -eq 'rejected')) {
                 $reason = ('because the storage endpoint refused a block with HTTP ' + [string]$Info['Status'])
+                if (-not [string]::IsNullOrWhiteSpace([string]$Info['Detail'])) { $reason += (' [' + [string]$Info['Detail'] + ']') }
+                if ([int]$Info['Waits'] -gt 0) { $reason += (' after ' + [string]$Info['Waits'] + ' wait(s) for it to start accepting blocks') }
             }
+            # Which trigger fired, and the SAS window it fired on (never the signature): the
+            # 2026-10-19 bulk runs renewed often and left no trace of why.
+            $sasWindow = 'SAS window unknown'
+            try { $sasWindow = Get-PDStorageSasSummary -Target $Info['Target'] } catch { }
             Write-PDUploadLog -Message ("The content file storage URI needs renewing {0}." -f $reason) -Level 'WARNING'
+            Write-PDUploadLog -Message ("Storage URI being renewed: {0}." -f $sasWindow) -Level 'WARNING'
 
             # No request body: Microsoft documents renewUpload as "Do not supply a request body",
             # and the service rejects the body that used to be sent (see RenewUploadBody).
@@ -1028,7 +1035,10 @@ function Invoke-PDIntuneUploadWriteStages {
                                                -Stage 'Upload' -Description 'content file record'
                 switch (Get-PDIntuneContentFileState -File $record -Phase 'RenewUpload') {
                     'Success' { return $record }
-                    'Failed'  { Stop-PDGraphError -Message 'Intune reported a terminal failure while renewing the content file storage URI, so the upload stopped here.' -Stage 'Upload' }
+                    # The service's own state and why renewal was asked for go into the message,
+                    # because this message is all a dot-sourced caller (Setup, the bulk tools) keeps.
+                    'Failed'  { Stop-PDGraphError -Message ("Intune reported a terminal failure (uploadState '{0}') while renewing the content file storage URI, so the upload stopped here. The renewal was needed {1}; {2}." -f `
+                                    ([string](Get-PDGraphPropertyValue -Object $record -Name 'uploadState')), $reason, $sasWindow) -Stage 'Upload' }
                     'Absent'  { Stop-PDGraphError -Message 'The content file record disappeared while its storage URI was being renewed.' -Stage 'Upload' }
                 }
                 return $null
@@ -1051,13 +1061,14 @@ function Invoke-PDIntuneUploadWriteStages {
         $target = Get-PDStorageUploadTarget `
                     -AzureStorageUri ([string](Get-PDGraphPropertyValue -Object $fileRecord -Name 'azureStorageUri')) `
                     -Stage $stage
+        try { Write-PDUploadLog -Message ("Storage URI ready: {0}." -f (Get-PDStorageSasSummary -Target $target)) } catch { }
 
         # --- 5. Upload ------------------------------------------------------------------
         $stage = 'Upload'
         $upload = Send-PDIntuneContentBlob -Target $target `
                                            -FilePath ([string]$package.PayloadPath) `
                                            -WhenExpiring $getFreshTarget -Stage $stage
-        Write-PDUploadLog -Message ("Uploaded {0} block(s), {1} byte(s), {2} renewal(s)." -f $upload.Blocks, $upload.Bytes, $upload.Renewals)
+        Write-PDUploadLog -Message ("Uploaded {0} block(s), {1} byte(s), {2} renewal(s), {3} wait(s) for a new storage URI to start accepting blocks." -f $upload.Blocks, $upload.Bytes, $upload.Renewals, [int]$upload.AccessWaits)
 
         # --- 6. Commit ------------------------------------------------------------------
         $stage = 'Commit'
