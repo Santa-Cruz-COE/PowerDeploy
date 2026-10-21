@@ -146,6 +146,10 @@ try {
         throw "InTune-GraphAPI_Helpers.ps1 loaded without defining its credential functions; it may be from a different version."
     }
 
+    # Give the uploader its own detailed log (same folder and name as a command-line run). Nothing
+    # is written until an upload actually runs, so importing still never creates a log file.
+    $script:PDUploadLogPath = "$WorkingDirectory\Logs\Other_Logs\Upload-InTuneWin32App.ps1._Log_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+
     $GraphUploadAvailable = $true
 
 } Catch {
