@@ -55,10 +55,13 @@ Param(
     $Version = $null,
 
     [Parameter(Mandatory=$false)]
-    $ReChecks = 15, # Number of times to re-check for installation after install command is run. This is to catch cases where the install process returns before the installation is fully complete and detectable. 
+    $ReChecks = 36, # Number of times to re-check for installation after install command is run (5 sec apart, so 36 = 3 min). This is to catch cases where the install process returns before the installation is fully complete and detectable. Was 15.
     
     #[String]$VerboseLogs = $True,
-    [int]$timeoutSeconds = 900 # Timeout in seconds (300 sec = 5 minutes) # THIS IS NOT BEING USED CURRENTLY
+    [int]$timeoutSeconds = 1800, # Max seconds to wait for winget.exe to exit (download + install). Was 900 and unused. 1800 = 30 min, leaving room inside Intune's default 60 min install limit. WinGet is never killed when this is reached.
+
+    [Parameter(Mandatory=$false)]
+    [int]$ActivityTimeoutSeconds = 600 # After winget.exe exits, max seconds to keep waiting while the installer it started is still running or Windows Installer is busy (installers that return early)
 
 )
 
@@ -252,6 +255,120 @@ function WinGet-Detect{ # TODO: I may replace this function. I have a whole scri
 
 }
 
+function Test-WindowsInstallerBusy {
+    # Windows Installer holds the Global\_MSIExecute mutex while any MSI install/uninstall is running.
+    # NOTE: This is machine-wide (not just our install), so only use it for bounded waits.
+    try {
+        $mutex = [System.Threading.Mutex]::OpenExisting('Global\_MSIExecute')
+        $mutex.Dispose()
+        return $true
+    } catch [System.Threading.WaitHandleCannotBeOpenedException] {
+        return $false
+    } catch [System.UnauthorizedAccessException] {
+        return $true # The mutex exists, we just aren't allowed to open it
+    } catch {
+        return $false # Unknown result, don't let it hold up the script
+    }
+}
+
+function WinGet-WaitForInstall {
+    Param(
+    $Process,
+    $ID
+    )
+
+    # Replaces the old fixed "Start-Sleep -Seconds 15" after starting the winget install.
+    # Step 1: Wait for winget.exe to exit, up to $timeoutSeconds. WinGet waits for the installer it launches, so for most apps this is the real end of the install.
+    # Step 2: Some installers hand their work to another process and return early. While a process started by this winget (directly or further down)
+    #         is still running, or Windows Installer is busy, keep waiting until the app is detected, up to $ActivityTimeoutSeconds.
+    # Nothing is ever killed. This polls HasExited instead of using Start-Process -Wait, because -Wait also waits for every child process (e.g. an app that opens itself after install).
+    # The exit code is only logged. Success is still decided by detection after this function returns.
+    # Tested 10/2026 on 12 apps (MSI, WiX, Inno, Adobe/Logitech bootstrappers): winget never exited before the install was done, but detection was sometimes true up to 18 sec before it was done.
+
+    if ($null -eq $Process) {
+        Write-Log "FUNCTION: $($MyInvocation.MyCommand.Name) | No process object was returned for WinGet. Falling back to a 15 second pause before detection." "WARNING"
+        Start-Sleep -Seconds 15
+        return
+    }
+
+    $null = $Process.Handle # Keeps the process handle open so ExitCode can still be read after it exits (Windows PowerShell quirk)
+    $startTime = Get-Date
+    $installerTree = @{ ([int]$Process.Id) = $true } # winget.exe plus every process it started, directly or further down
+
+    # Adds newly started child processes to $installerTree and returns the ones still running (not counting winget.exe itself)
+    function Update-InstallerTree {
+        # If WMI fails, carry on with no process info (the wait then relies on WinGet's exit and Windows Installer only)
+        try { $allProcs = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId, Name, CreationDate -ErrorAction Stop) } catch { $allProcs = @() }
+        do {
+            $added = 0
+            foreach ($p in $allProcs) {
+                $procId = [int]$p.ProcessId
+                # CreationDate check guards against Windows reusing the PID of an exited parent
+                if (-not $installerTree.ContainsKey($procId) -and $installerTree.ContainsKey([int]$p.ParentProcessId) -and $p.CreationDate -ge $startTime.AddSeconds(-2)) {
+                    $installerTree[$procId] = $true
+                    $added++
+                    Write-Log "FUNCTION: WinGet-WaitForInstall | Installer process started: $($p.Name) (PID $procId, parent PID $($p.ParentProcessId))"
+                }
+            }
+        } while ($added -gt 0)
+        $allProcs | Where-Object { $installerTree.ContainsKey([int]$_.ProcessId) -and [int]$_.ProcessId -ne $Process.Id } | ForEach-Object { "$($_.Name) (PID $($_.ProcessId))" }
+    }
+
+    # Step 1: wait for winget.exe to exit
+    Write-Log "FUNCTION: $($MyInvocation.MyCommand.Name) | Waiting for WinGet (PID $($Process.Id)) to finish installing $ID. Time limit: $timeoutSeconds seconds"
+    $lastReport = 0
+    while (-not $Process.HasExited) {
+        $null = Update-InstallerTree
+        $elapsed = ((Get-Date) - $startTime).TotalSeconds
+        if ($elapsed -ge $timeoutSeconds) {
+            Write-Log "FUNCTION: $($MyInvocation.MyCommand.Name) | WinGet is still running after $timeoutSeconds seconds. It will NOT be stopped. Moving on to detection." "WARNING"
+            return
+        }
+        if (($elapsed - $lastReport) -ge 30) {
+            Write-Log "FUNCTION: $($MyInvocation.MyCommand.Name) | WinGet still running. Time elapsed: $([int]$elapsed) / $timeoutSeconds seconds"
+            $lastReport = $elapsed
+        }
+        Start-Sleep -Seconds 1
+    }
+
+    $exitCode = $Process.ExitCode
+    if ($null -ne $exitCode) { $exitCodeHex = '0x{0:X8}' -f $exitCode } else { $exitCodeHex = "unknown" }
+    Write-Log "FUNCTION: $($MyInvocation.MyCommand.Name) | WinGet exited after $([int]((Get-Date) - $startTime).TotalSeconds) seconds with exit code $exitCode ($exitCodeHex). NOTE: The exit code is for reference only, detection decides success."
+
+    # Step 2: keep waiting while the install still visibly has work going on
+    $activityStart = Get-Date
+    $lastCheck = [datetime]::MinValue
+    while ($true) {
+        $stillRunning = @(Update-InstallerTree)
+        $msiBusy = Test-WindowsInstallerBusy
+        $elapsed = ((Get-Date) - $activityStart).TotalSeconds
+
+        if ($stillRunning.Count -eq 0 -and -not $msiBusy) {
+            Write-Log "FUNCTION: $($MyInvocation.MyCommand.Name) | No installer activity remaining (waited $([int]$elapsed) extra seconds after WinGet exited)."
+            break
+        }
+
+        if ($elapsed -ge $ActivityTimeoutSeconds) {
+            Write-Log "FUNCTION: $($MyInvocation.MyCommand.Name) | Installer activity still present after $ActivityTimeoutSeconds seconds (processes: $($stillRunning -join ', '); Windows Installer busy: $msiBusy). Nothing will be stopped. Moving on to detection." "WARNING"
+            break
+        }
+
+        if (((Get-Date) - $lastCheck).TotalSeconds -ge 15) {
+            $lastCheck = Get-Date
+            Write-Log "FUNCTION: $($MyInvocation.MyCommand.Name) | WinGet has exited but the install still looks active. Installer processes running: $(if ($stillRunning.Count) { $stillRunning -join ', ' } else { 'none' }). Windows Installer busy: $msiBusy. Time elapsed: $([int]$elapsed) / $ActivityTimeoutSeconds seconds"
+
+            # An app that opens itself after install (or leftover helper processes) would keep the process check busy forever, so stop once the app is detected and Windows Installer is idle
+            if (-not $msiBusy -and (WinGet-Detect $ID) -eq $true) {
+                Write-Log "FUNCTION: $($MyInvocation.MyCommand.Name) | $ID is detected and Windows Installer is idle. Treating remaining processes as the app itself or leftovers. Done waiting."
+                break
+            }
+        }
+
+        Start-Sleep -Seconds 1
+    }
+
+}
+
 Function Validate-WinGet-Search{
 
 
@@ -321,6 +438,7 @@ Write-Log "AppID: $AppID"
 Write-Log "WorkingDirectory: $WorkingDirectory"
 Write-Log "Version: $Version"
 Write-Log "TmeoutSeconds: $timeoutSeconds"
+Write-Log "ActivityTimeoutSeconds: $ActivityTimeoutSeconds"
 
 Write-Log "==========================================="
 
@@ -455,9 +573,10 @@ if($detectPreviousInstallation -eq $true){
 
         #$proc = 
         
+        $proc = $null
         try { 
             
-            Start-Process -FilePath "$cmd" -ArgumentList $args -NoNewWindow -PassThru -RedirectStandardOutput "$InstallationOutputLog" -RedirectStandardError "$InstallationErrorLog" 
+            $proc = Start-Process -FilePath "$cmd" -ArgumentList $args -NoNewWindow -PassThru -RedirectStandardOutput "$InstallationOutputLog" -RedirectStandardError "$InstallationErrorLog"
 
         } catch { 
 
@@ -465,9 +584,11 @@ if($detectPreviousInstallation -eq $true){
         
         }   
 
+        # Wait for WinGet (and any installer work it leaves running) to finish before detecting
+        WinGet-WaitForInstall -Process $proc -ID $AppID
 
         Write-Log "Installation process of $AppID completed, now detecting local installation..."
-        Start-Sleep -Seconds 15 
+        # Start-Sleep -Seconds 15 # Replaced by WinGet-WaitForInstall above
         $detectInstallation = WinGet-Detect $AppID
 
         if($detectInstallation -eq $true){
@@ -558,6 +679,12 @@ if($detectPreviousInstallation -eq $true){
         # if ($_ -match "-1073741701"){
         try {
 
+            # Never reset WinGet while the install it started is still running (on 10/17/2026 this orphaned a LibreOffice install and started a second one in parallel)
+            # This only happens if WinGet-WaitForInstall hit $timeoutSeconds. Skips the reset and retry, and goes straight to the final re-checks below.
+            if ($null -ne $proc -and -not $proc.HasExited) {
+                Throw "WinGet (PID $($proc.Id)) is still running, so WinGet will not be reset and the install will not be retried. Moving on to final checks."
+            }
+
             Write-Log "Attempting WinGet reset just in case there is corruption..."
             # try clearing the WinGet cache and uninstall
             remove-item -path  "$env:LOCALAPPDATA\Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\settings.json" -ErrorAction SilentlyContinue
@@ -591,9 +718,10 @@ if($detectPreviousInstallation -eq $true){
             # Try installation of target ID again
             # TODO: make this into a function later
             
+                $proc = $null
                 try { 
             
-                    Start-Process -FilePath "$cmd" -ArgumentList $args -NoNewWindow -PassThru -RedirectStandardOutput "$InstallationOutputLog" -RedirectStandardError "$InstallationErrorLog" 
+                    $proc = Start-Process -FilePath "$cmd" -ArgumentList $args -NoNewWindow -PassThru -RedirectStandardOutput "$InstallationOutputLog" -RedirectStandardError "$InstallationErrorLog"
 
                 } catch { 
 
@@ -601,8 +729,11 @@ if($detectPreviousInstallation -eq $true){
                 
                 }   
 
+                # Wait for WinGet (and any installer work it leaves running) to finish before detecting
+                WinGet-WaitForInstall -Process $proc -ID $AppID
+
                 Write-Log "Installation process of $AppID completed, now detecting local installation..."
-                Start-Sleep -Seconds 15 
+                # Start-Sleep -Seconds 15 # Replaced by WinGet-WaitForInstall above
                 $detectInstallation2 = WinGet-Detect $AppID
 
                 if($detectInstallation2 -eq $true){
