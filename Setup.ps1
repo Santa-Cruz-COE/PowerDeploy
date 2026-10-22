@@ -100,6 +100,10 @@ $IntuneUploadScriptPath = "$RepoRoot\Other_Tools\Upload-InTuneWin32App.ps1"
 $WinGetDescriptionScriptPath = "$RepoRoot\Other_Tools\Get-WinGetAppDescription.ps1"
 # Standard icon for every printer published to Intune (plain on purpose: users see "a printer")
 $PrinterIconPath = "$RepoRoot\Templates\Printer-Icon.png"
+# SVG-to-PNG converter for app icons: resvg v0.47.0 (MIT/Apache-2.0, github.com/linebender/resvg, the last
+# release with a Windows build). Pinned by hash: a different file is never run. Update both lines together.
+$SvgConverterExePath = "$RepoRoot\Other_Tools\resvg\resvg.exe"
+$SvgConverterExeSha256 = '433A7C744CFF561ED64FCF73C7C04E239D7A07AE5F0AADBF1BA8471D63707402'
 # Path to the shared printer/Intune builders (dot-sourced below: functions only)
 $PrinterIntuneHelpersScriptPath = "$RepoRoot\Other_Tools\Printer-Intune_Helpers.ps1"
 # Path to the bulk printer tools: bulk create from PrinterData.json, bulk delete (dot-sourced below: functions only)
@@ -2707,8 +2711,19 @@ Function WindowsApp--InTune-Setup{
     if ($AppLinks.InformationUrl) { Write-Log "     - INFORMATION URL:"; Write-LogBlock "`n$($AppLinks.InformationUrl)`n" }
     if ($AppLinks.PrivacyUrl)     { Write-Log "     - PRIVACY URL:";     Write-LogBlock "`n$($AppLinks.PrivacyUrl)`n" }
     if ($AppIconFile) {
-        Write-Log "     - LOGO: Select image and upload:"
-        Write-LogBlock "`n$AppIconFile`n"
+        # An SVG is converted to a PNG for the operator, into Setup's Temp folder like a download.
+        $GuidedIconFile = Resolve-IntuneSvgIconFile -Path $AppIconFile -Directory "$WorkingDirectory\Temp\Intune_Icons"
+        if ($GuidedIconFile.Warning) {
+            Write-Log "     $($GuidedIconFile.Warning)" "WARNING"
+            Write-Log "     - LOGO: Convert this SVG to PNG yourself and upload it:"
+            Write-LogBlock "`n$AppIconFile`n"
+        } elseif ($GuidedIconFile.Converted) {
+            Write-Log "     - LOGO: Select image and upload (converted to PNG from the catalog's SVG IconFile):"
+            Write-LogBlock "`n$($GuidedIconFile.Path)`n"
+        } else {
+            Write-Log "     - LOGO: Select image and upload:"
+            Write-LogBlock "`n$AppIconFile`n"
+        }
     } elseif ($AppIconUrl) {
         # Download it for the operator, into Setup's Temp folder (beside the repo, never inside it).
         $GuidedIcon = Save-IntuneIconFromUrl -Url $AppIconUrl -Directory "$WorkingDirectory\Temp\Intune_Icons"
@@ -5867,6 +5882,139 @@ Function Test-IntuneIconBytes {
     return $null
 }
 
+Function Test-IntuneIconIsSvg {
+    param([AllowNull()][byte[]]$Bytes)
+
+    # $true when the content is SVG text: markup from the first character (after an optional UTF-8
+    # BOM and whitespace) with an <svg element near the top. resvg makes the final call.
+    if ($null -eq $Bytes -or $Bytes.Length -lt 5) { return $false }
+    $Text = [System.Text.Encoding]::UTF8.GetString($Bytes, 0, [Math]::Min($Bytes.Length, 4096)).TrimStart([char]0xFEFF).TrimStart()
+    return ($Text.StartsWith('<') -and ($Text -match '<svg[\s>]'))
+}
+
+Function Get-IntuneSvgConverterStartFailure {
+    param([AllowNull()][System.Exception]$Exception)
+
+    # Why Windows would not start resvg.exe, in words that say what to fix. Application control
+    # and antivirus are named outright: resvg.exe is not code-signed, so policies that only allow
+    # signed programs block it.
+    $Native = $null
+    $Current = $Exception
+    while ($null -ne $Current) {
+        if ($Current -is [System.ComponentModel.Win32Exception]) { $Native = $Current.NativeErrorCode; break }
+        $Current = $Current.InnerException
+    }
+
+    switch ($Native) {
+        1260 { return "Windows blocked the SVG icon converter (Other_Tools\resvg\resvg.exe) from running: an AppLocker or software restriction policy on this PC does not allow it (resvg.exe is not code-signed)." }
+        4551 { return "Windows blocked the SVG icon converter (Other_Tools\resvg\resvg.exe) from running: an App Control (WDAC) policy on this PC does not allow it (resvg.exe is not code-signed)." }
+        225  { return "Antivirus blocked the SVG icon converter (Other_Tools\resvg\resvg.exe) from running." }
+    }
+    $Reason = if ($null -ne $Exception) { $Exception.Message } else { 'unknown error' }
+    return "The SVG icon converter (Other_Tools\resvg\resvg.exe) could not be started: $Reason"
+}
+
+Function ConvertTo-IntuneIconPng {
+    param(
+        [Parameter(Mandatory = $true)][string]$SvgPath,
+        # Where icon.png is written; created when missing, and removed again on failure if it was.
+        [Parameter(Mandatory = $true)][string]$Directory,
+        # How the icon is named in warnings (the catalog's IconUrl or IconFile); default: the file name.
+        [string]$Label,
+        [int]$Size = 512,
+        [int]$TimeoutSec = 30,
+        [int]$MaxBytes = 1048576,
+        [string]$ExePath = $SvgConverterExePath,
+        [string]$ExpectedSha256 = $SvgConverterExeSha256
+    )
+
+    # SVG -> PNG with the pinned resvg build, fitted inside Size x Size with its shape kept.
+    # Returns @{ Path; Warning } like Save-IntuneIconFromUrl: Path is empty on any failure and
+    # Warning says exactly why, because an icon must never stop an app being published.
+    if ([string]::IsNullOrWhiteSpace($Label)) { $Label = Split-Path -Leaf $SvgPath }
+    $NoIcon = "The SVG icon '$Label' was not converted, so no icon will be used. To use this logo, convert it to PNG yourself and set IconFile."
+
+    if ([string]::IsNullOrWhiteSpace($ExePath) -or -not (Test-Path -LiteralPath $ExePath -PathType Leaf)) {
+        return @{ Path = ''; Warning = "The SVG icon converter is missing (expected at $ExePath). $NoIcon" }
+    }
+    $ActualSha256 = (Get-FileHash -LiteralPath $ExePath -Algorithm SHA256).Hash
+    if ($ActualSha256 -ne $ExpectedSha256) {
+        return @{ Path = ''; Warning = "The SVG icon converter $ExePath is not the pinned resvg build (SHA256 $ActualSha256, expected $ExpectedSha256), so it was not run. Restore it from the repository. $NoIcon" }
+    }
+
+    $CreatedDirectory = -not (Test-Path -LiteralPath $Directory)
+    # The SVG is rendered from a folder of its own, which is also where its relative links resolve.
+    $Work = Join-Path $Directory ('svg_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $Png = Join-Path $Directory 'icon.png'
+    $Warning = $null
+    try {
+        New-Item -ItemType Directory -Path $Work -Force | Out-Null
+        $Source = Join-Path $Work 'source.svg'
+        Copy-Item -LiteralPath $SvgPath -Destination $Source -Force
+
+        $StartInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $StartInfo.FileName = $ExePath
+        $StartInfo.Arguments = ('-w {0} -h {0} --resources-dir "{1}" "{2}" "{3}"' -f $Size, $Work, $Source, $Png)
+        $StartInfo.UseShellExecute = $false
+        $StartInfo.CreateNoWindow = $true
+        $StartInfo.RedirectStandardOutput = $true
+        $StartInfo.RedirectStandardError = $true
+
+        $Process = $null
+        try { $Process = [System.Diagnostics.Process]::Start($StartInfo) } Catch { $Warning = (Get-IntuneSvgConverterStartFailure -Exception $_.Exception) + " $NoIcon" }
+
+        if ($null -ne $Process) {
+            $ErrorText = $Process.StandardError.ReadToEndAsync()
+            $null = $Process.StandardOutput.ReadToEndAsync()
+            if (-not $Process.WaitForExit($TimeoutSec * 1000)) {
+                try { $Process.Kill() } Catch { }
+                $Warning = "The SVG icon converter did not finish within $TimeoutSec seconds. $NoIcon"
+            } elseif (($Process.ExitCode -ne 0) -or -not (Test-Path -LiteralPath $Png)) {
+                $Detail = @(([string]$ErrorText.Result) -split "`r?`n" | Where-Object { $_.Trim() }) | Select-Object -First 1
+                if ([string]::IsNullOrWhiteSpace($Detail)) { $Detail = "exit code $($Process.ExitCode)" }
+                $Warning = "The SVG icon converter could not read the SVG ($($Detail.Trim())). $NoIcon"
+            } elseif ((Get-Item -LiteralPath $Png).Length -gt $MaxBytes) {
+                $Warning = ("The PNG converted from the SVG icon is {0:N0} KB, larger than the {1:N0} KB limit. {2}" -f ((Get-Item -LiteralPath $Png).Length / 1KB), ($MaxBytes / 1KB), $NoIcon)
+            } elseif ((Test-IntuneIconBytes -Bytes ([System.IO.File]::ReadAllBytes($Png))) -ne 'png') {
+                $Warning = "The SVG icon converter did not produce a PNG. $NoIcon"
+            }
+            $Process.Dispose()
+        }
+    } Catch {
+        $Warning = "The SVG icon could not be converted ($($_.Exception.Message)). $NoIcon"
+    } finally {
+        Remove-Item -LiteralPath $Work -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($Warning) {
+        Remove-Item -LiteralPath $Png -Force -ErrorAction SilentlyContinue
+        if ($CreatedDirectory) { Remove-Item -LiteralPath $Directory -Recurse -Force -ErrorAction SilentlyContinue }
+        return @{ Path = ''; Warning = $Warning }
+    }
+    return @{ Path = $Png; Warning = $null }
+}
+
+Function Resolve-IntuneSvgIconFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        # Same meaning as Save-IntuneIconFromUrl's -Directory.
+        [string]$Directory
+    )
+
+    # A catalog IconFile that is SVG becomes a PNG copy; any other file comes back as it is (the
+    # uploader and the operator check PNG/JPEG themselves). Returns @{ Path; Warning; Converted }.
+    $Bytes = $null
+    try { $Bytes = [System.IO.File]::ReadAllBytes($Path) } Catch { }
+    if ((Test-IntuneIconBytes -Bytes $Bytes) -or -not (Test-IntuneIconIsSvg -Bytes $Bytes)) {
+        return @{ Path = $Path; Warning = $null; Converted = $false }
+    }
+
+    $Folder = Join-Path ([System.IO.Path]::GetTempPath()) ('PowerDeploy-Icon-' + [guid]::NewGuid().ToString('N'))
+    if (-not [string]::IsNullOrWhiteSpace($Directory)) { $Folder = Join-Path $Directory ((Get-Date -Format 'yyyyMMdd_HHmmss') + '_' + [guid]::NewGuid().ToString('N').Substring(0, 8)) }
+    $Result = ConvertTo-IntuneIconPng -SvgPath $Path -Directory $Folder -Label $Path
+    return @{ Path = [string]$Result.Path; Warning = $Result.Warning; Converted = [bool]$Result.Path }
+}
+
 Function Save-IntuneIconFromUrl {
     param(
         [Parameter(Mandatory = $true)][string]$Url,
@@ -5877,7 +6025,8 @@ Function Save-IntuneIconFromUrl {
         [string]$Directory
     )
 
-    # HTTPS only, bounded, no credentials sent, and the content must really be a PNG or JPEG.
+    # HTTPS only, bounded, no credentials sent, and the content must really be a PNG or JPEG
+    # (an SVG is converted to a PNG).
     # Returns @{ Path; Warning } - Path is empty when no usable icon was downloaded.
     $Parsed = $null
     if (-not ([System.Uri]::TryCreate($Url, [System.UriKind]::Absolute, [ref]$Parsed)) -or ($Parsed.Scheme -ne 'https')) {
@@ -5890,7 +6039,9 @@ Function Save-IntuneIconFromUrl {
         New-Item -ItemType Directory -Path $Folder -Force | Out-Null
         $Download = Join-Path $Folder 'download.bin'
         $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest -Uri $Url -OutFile $Download -UseBasicParsing -TimeoutSec $TimeoutSec -MaximumRedirection 5 -ErrorAction Stop
+        # A named User-Agent: some logo hosts (Wikimedia) answer PowerShell's default one with 429.
+        $UserAgent = 'PowerDeploy/1.0 (Intune app icon download; +https://github.com/Santa-Cruz-COE/PowerDeploy)'
+        Invoke-WebRequest -Uri $Url -OutFile $Download -UseBasicParsing -TimeoutSec $TimeoutSec -MaximumRedirection 5 -UserAgent $UserAgent -ErrorAction Stop
 
         $Length = (Get-Item -LiteralPath $Download).Length
         if ($Length -gt $MaxBytes) {
@@ -5898,10 +6049,18 @@ Function Save-IntuneIconFromUrl {
             return @{ Path = ''; Warning = ("The icon at '{0}' is {1:N0} KB, larger than the {2:N0} KB limit, so no icon will be used." -f $Url, ($Length / 1KB), ($MaxBytes / 1KB)) }
         }
 
-        $Kind = Test-IntuneIconBytes -Bytes ([System.IO.File]::ReadAllBytes($Download))
+        $Bytes = [System.IO.File]::ReadAllBytes($Download)
+        $Kind = Test-IntuneIconBytes -Bytes $Bytes
+        if (-not $Kind -and (Test-IntuneIconIsSvg -Bytes $Bytes)) {
+            # Many official logos are only published as SVG; Intune takes PNG/JPEG, so convert it.
+            $Converted = ConvertTo-IntuneIconPng -SvgPath $Download -Directory $Folder -Label $Url
+            if (-not $Converted.Path) { Remove-Item -LiteralPath $Folder -Recurse -Force -ErrorAction SilentlyContinue; return $Converted }
+            Remove-Item -LiteralPath $Download -Force -ErrorAction SilentlyContinue
+            return $Converted
+        }
         if (-not $Kind) {
             Remove-Item -LiteralPath $Folder -Recurse -Force -ErrorAction SilentlyContinue
-            return @{ Path = ''; Warning = "The file at '$Url' is not a PNG or JPEG image, so no icon will be used." }
+            return @{ Path = ''; Warning = "The file at '$Url' is not a PNG, JPEG or SVG image, so no icon will be used." }
         }
 
         $Final = Join-Path $Folder ('icon.' + $Kind)
@@ -6114,6 +6273,20 @@ Function Invoke-InTuneAutoUpload {
             IconFile                = [string]$Metadata.IconFile
             InformationUrl          = [string]$Metadata.InformationUrl
             PrivacyUrl              = [string]$Metadata.PrivacyUrl
+        }
+
+        # A catalog IconFile that is SVG is converted to a PNG copy here, deleted when this function
+        # finishes like a downloaded icon. A failed conversion just means no icon.
+        if (-not [string]::IsNullOrWhiteSpace($Common.IconFile)) {
+            $ResolvedIcon = Resolve-IntuneSvgIconFile -Path $Common.IconFile
+            if ($ResolvedIcon.Warning) {
+                Write-Log $ResolvedIcon.Warning "WARNING"
+                $Common.IconFile = ''
+            } elseif ($ResolvedIcon.Converted) {
+                $Common.IconFile = $ResolvedIcon.Path
+                $DownloadedIconPath = $ResolvedIcon.Path
+                Write-Log "Converted the SVG app icon $($Metadata.IconFile) to PNG" "INFO2"
+            }
         }
 
         # An icon given as a link is downloaded here, on this PC, only for automatic mode, and the

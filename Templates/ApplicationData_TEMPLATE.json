@@ -123,7 +123,8 @@
     "InstallMethod": "WinGet",
     "WinGetID": "TheDocumentFoundation.LibreOffice",
     "AppDescription": "Free, open source office suite: Writer, Calc, Impress and Draw. Setup's bulk printer tools offer it for editing their CSV sheets on PCs without a spreadsheet program.",
-    "Publisher": "The Document Foundation"
+    "Publisher": "The Document Foundation",
+    "IconUrl": "https://upload.wikimedia.org/wikipedia/commons/4/48/LibreOffice_7.5_Main_Icon.svg?utm_source=commons.wikimedia.org&utm_campaign=index&utm_content=original"
   },
   {
     "ApplicationName": "MSI-Private-AzureBlob_Example",

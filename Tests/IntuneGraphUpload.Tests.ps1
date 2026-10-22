@@ -5002,6 +5002,189 @@ Add-TestCase 'I05' 'semicolon-separated groups reach the uploader as separate na
 }
 
 # ---------------------------------------------------------------------------
+# SVG app icons: converted to PNG with the pinned Other_Tools\resvg\resvg.exe
+# ---------------------------------------------------------------------------
+
+function Get-PDIconSetupText {
+    # The icon functions exactly as Setup.ps1 defines them, plus the converter's pinned path and
+    # hash read from Setup.ps1 itself, so a test can never pass against a different pin.
+    $names = @('Test-IntuneIconBytes', 'Test-IntuneIconIsSvg', 'Get-IntuneSvgConverterStartFailure',
+               'ConvertTo-IntuneIconPng', 'Resolve-IntuneSvgIconFile', 'Save-IntuneIconFromUrl')
+    $setupText = [System.IO.File]::ReadAllText((Join-Path (Split-Path $PSScriptRoot -Parent) 'Setup.ps1'))
+    $pin = [regex]::Match($setupText, "(?m)^\`$SvgConverterExeSha256 = '([0-9A-F]{64})'")
+    Assert-True $pin.Success 'Setup.ps1 pins the converter hash'
+    $exe = Join-Path (Split-Path $PSScriptRoot -Parent) 'Other_Tools\resvg\resvg.exe'
+    $lines = @("`$SvgConverterExePath = '$exe'", "`$SvgConverterExeSha256 = '$($pin.Groups[1].Value)'")
+    foreach ($name in $names) { $lines += [string](Get-PDM5SetupFunction -Name $name).Extent.Text }
+    return ($lines -join "`r`n")
+}
+
+function Get-PDPngSize {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    # Width x height from the PNG header (big-endian IHDR fields), no imaging library needed.
+    $b = [System.IO.File]::ReadAllBytes($Path)
+    $w = ($b[16] * 16777216) + ($b[17] * 65536) + ($b[18] * 256) + $b[19]
+    $h = ($b[20] * 16777216) + ($b[21] * 65536) + ($b[22] * 256) + $b[23]
+    return "${w}x${h}"
+}
+
+$script:PDWideSvg = '<?xml version="1.0" encoding="UTF-8"?>' + "`r`n" + '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><circle cx="25" cy="25" r="20" fill="#0078d4"/><rect x="55" y="5" width="40" height="40" fill="#e81123"/></svg>'
+$script:PDTallSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="500" height="1000"><rect width="500" height="1000" fill="#107c10"/></svg>'
+
+Add-TestCase 'IC01' 'The committed resvg.exe is the build Setup.ps1 pins, with its licenses beside it' {
+    $tools = Join-Path (Split-Path $PSScriptRoot -Parent) 'Other_Tools\resvg'
+    $setupText = [System.IO.File]::ReadAllText((Join-Path (Split-Path $PSScriptRoot -Parent) 'Setup.ps1'))
+    $pin = [regex]::Match($setupText, "(?m)^\`$SvgConverterExeSha256 = '([0-9A-F]{64})'").Groups[1].Value
+    Assert-Equal $pin (Get-FileHash -LiteralPath (Join-Path $tools 'resvg.exe') -Algorithm SHA256).Hash 'resvg.exe matches the pin'
+    Assert-True (Test-Path -LiteralPath (Join-Path $tools 'LICENSE-MIT.txt')) 'MIT license shipped'
+    Assert-True (Test-Path -LiteralPath (Join-Path $tools 'LICENSE-APACHE.txt')) 'Apache license shipped'
+}
+
+Add-TestCase 'IC02' 'SVG content is recognised from the bytes, never from the name' {
+    $text = Get-PDIconSetupText
+    & {
+        . ([scriptblock]::Create($text))
+        $utf8 = [System.Text.Encoding]::UTF8
+        Assert-True (Test-IntuneIconIsSvg -Bytes $utf8.GetBytes($script:PDWideSvg)) 'XML declaration then <svg>'
+        Assert-True (Test-IntuneIconIsSvg -Bytes $utf8.GetBytes($script:PDTallSvg)) 'bare <svg>'
+        Assert-True (Test-IntuneIconIsSvg -Bytes ([byte[]](0xEF, 0xBB, 0xBF) + $utf8.GetBytes("  `r`n<SVG viewBox='0 0 1 1'></SVG>"))) 'BOM, whitespace, upper case'
+        Assert-True (-not (Test-IntuneIconIsSvg -Bytes $utf8.GetBytes('<!doctype html><html><body>404</body></html>'))) 'an HTML error page is not an SVG'
+        Assert-True (-not (Test-IntuneIconIsSvg -Bytes $utf8.GetBytes('see <svg> below'))) 'text that merely mentions <svg>'
+        Assert-True (-not (Test-IntuneIconIsSvg -Bytes ([byte[]](0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)))) 'a PNG'
+        Assert-True (-not (Test-IntuneIconIsSvg -Bytes $null)) 'nothing'
+    }
+}
+
+Add-TestCase 'IC03' 'An SVG becomes a PNG fitted inside 512x512 with its shape kept' {
+    $text = Get-PDIconSetupText
+    $dir = Join-Path $tempRoot ('ic03-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $dir 'wide.svg'), $script:PDWideSvg)
+    [System.IO.File]::WriteAllText((Join-Path $dir 'tall.svg'), $script:PDTallSvg)
+    & {
+        . ([scriptblock]::Create($text))
+        $wide = ConvertTo-IntuneIconPng -SvgPath (Join-Path $dir 'wide.svg') -Directory (Join-Path $dir 'out-wide')
+        Assert-True ([string]::IsNullOrEmpty($wide.Warning)) ("no warning: {0}" -f $wide.Warning)
+        Assert-Equal (Join-Path (Join-Path $dir 'out-wide') 'icon.png') $wide.Path 'icon.png in the given folder'
+        Assert-Equal 'png' (Test-IntuneIconBytes -Bytes ([System.IO.File]::ReadAllBytes($wide.Path))) 'a real PNG'
+        Assert-Equal '512x256' (Get-PDPngSize -Path $wide.Path) 'wide logo keeps its shape'
+        Assert-Equal 1 @(Get-ChildItem -LiteralPath (Join-Path $dir 'out-wide') -Force).Count 'only icon.png is left behind'
+
+        $tall = ConvertTo-IntuneIconPng -SvgPath (Join-Path $dir 'tall.svg') -Directory (Join-Path $dir 'out-tall')
+        Assert-Equal '256x512' (Get-PDPngSize -Path $tall.Path) 'tall logo keeps its shape'
+    }
+}
+
+Add-TestCase 'IC04' 'A missing or swapped converter is never run and says so' {
+    $text = Get-PDIconSetupText
+    $dir = Join-Path $tempRoot ('ic04-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $svg = Join-Path $dir 'logo.svg'
+    [System.IO.File]::WriteAllText($svg, $script:PDWideSvg)
+    & {
+        . ([scriptblock]::Create($text))
+        $missing = ConvertTo-IntuneIconPng -SvgPath $svg -Directory (Join-Path $dir 'out-missing') -ExePath (Join-Path $dir 'absent.exe') -Label 'https://example.test/logo.svg'
+        Assert-Equal '' $missing.Path 'no icon'
+        Assert-Like '*converter is missing*' $missing.Warning 'says it is missing'
+        Assert-Like "*'https://example.test/logo.svg' was not converted, so no icon will be used*" $missing.Warning 'names the icon and the outcome'
+
+        $swapped = ConvertTo-IntuneIconPng -SvgPath $svg -Directory (Join-Path $dir 'out-swapped') -ExpectedSha256 ('0' * 64)
+        Assert-Equal '' $swapped.Path 'no icon'
+        Assert-Like '*not the pinned resvg build*was not run*' $swapped.Warning 'refuses an unexpected binary'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $dir 'out-swapped'))) 'nothing was created'
+    }
+}
+
+Add-TestCase 'IC05' 'An SVG resvg cannot read is a warning with its reason, and nothing is left behind' {
+    $text = Get-PDIconSetupText
+    $dir = Join-Path $tempRoot ('ic05-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $svg = Join-Path $dir 'broken.svg'
+    [System.IO.File]::WriteAllText($svg, '<svg xmlns="http://www.w3.org/2000/svg"><rect')
+    & {
+        . ([scriptblock]::Create($text))
+        $result = ConvertTo-IntuneIconPng -SvgPath $svg -Directory (Join-Path $dir 'out')
+        Assert-Equal '' $result.Path 'no icon'
+        Assert-Like '*could not read the SVG (*)*was not converted*' $result.Warning 'passes on resvg''s reason'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $dir 'out'))) 'the folder it created is removed again'
+    }
+}
+
+Add-TestCase 'IC06' 'A converter Windows will not start is named as blocked, with the policy kind' {
+    $text = Get-PDIconSetupText
+    & {
+        . ([scriptblock]::Create($text))
+        $wrap = { param($code) New-Object System.Exception('Exception calling "Start"', (New-Object System.ComponentModel.Win32Exception ([int]$code))) }
+        Assert-Like '*blocked*AppLocker*not code-signed*' (Get-IntuneSvgConverterStartFailure -Exception (& $wrap 1260)) 'AppLocker / SRP'
+        Assert-Like '*blocked*App Control (WDAC)*not code-signed*' (Get-IntuneSvgConverterStartFailure -Exception (& $wrap 4551)) 'WDAC'
+        Assert-Like 'Antivirus blocked*' (Get-IntuneSvgConverterStartFailure -Exception (& $wrap 225)) 'antivirus'
+        Assert-Like '*could not be started: *' (Get-IntuneSvgConverterStartFailure -Exception (& $wrap 2)) 'anything else keeps the system reason'
+    }
+}
+
+Add-TestCase 'IC07' 'An IconUrl that serves an SVG is converted; PNG downloads are untouched' {
+    $text = Get-PDIconSetupText
+    $dir = Join-Path $tempRoot ('ic07-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $served = Join-Path $dir 'served.bin'
+    & {
+        # The download is faked; everything after it is Setup's own code.
+        $agents = New-Object System.Collections.ArrayList
+        function Invoke-WebRequest { param($Uri, $OutFile, [switch]$UseBasicParsing, $TimeoutSec, $MaximumRedirection, $UserAgent) $null = $agents.Add([string]$UserAgent); Copy-Item -LiteralPath $served -Destination $OutFile }
+        . ([scriptblock]::Create($text))
+
+        [System.IO.File]::WriteAllText($served, $script:PDWideSvg)
+        $svg = Save-IntuneIconFromUrl -Url 'https://example.test/logo.svg' -Directory (Join-Path $dir 'icons')
+        Assert-True ([string]::IsNullOrEmpty($svg.Warning)) ("no warning: {0}" -f $svg.Warning)
+        # Regression (first live SVG test, 2026-10-22): Wikimedia answered PowerShell's default User-Agent with 429.
+        Assert-Like 'PowerDeploy/* (*https://github.com/*)' ([string]$agents[0]) 'the download names itself, with a contact link'
+        Assert-Equal 'icon.png' (Split-Path -Leaf $svg.Path) 'a PNG icon'
+        Assert-Equal '512x256' (Get-PDPngSize -Path $svg.Path) 'rendered from the SVG'
+        Assert-Equal 1 @(Get-ChildItem -LiteralPath (Split-Path -Parent $svg.Path) -Force).Count 'the SVG download is not kept beside it'
+
+        $png = [byte[]](0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4)
+        [System.IO.File]::WriteAllBytes($served, $png)
+        $plain = Save-IntuneIconFromUrl -Url 'https://example.test/logo.png'
+        Assert-Equal ([Convert]::ToBase64String($png)) ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($plain.Path))) 'a PNG is passed through byte for byte'
+        Remove-Item -LiteralPath (Split-Path -Parent $plain.Path) -Recurse -Force
+
+        [System.IO.File]::WriteAllText($served, '<!doctype html><html><body>404</body></html>')
+        $html = Save-IntuneIconFromUrl -Url 'https://example.test/missing'
+        Assert-Equal '' $html.Path 'no icon'
+        Assert-Like '*not a PNG, JPEG or SVG image*' $html.Warning 'says which formats work'
+    }
+}
+
+Add-TestCase 'IC08' 'An SVG IconFile is converted to a copy; any other IconFile is left as it is' {
+    $text = Get-PDIconSetupText
+    $dir = Join-Path $tempRoot ('ic08-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $svg = Join-Path $dir 'logo.svg'
+    [System.IO.File]::WriteAllText($svg, $script:PDTallSvg)
+    $png = Join-Path $dir 'logo.png'
+    [System.IO.File]::WriteAllBytes($png, [byte[]](0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4))
+    & {
+        . ([scriptblock]::Create($text))
+        $kept = Resolve-IntuneSvgIconFile -Path $png -Directory (Join-Path $dir 'icons')
+        Assert-Equal $png $kept.Path 'a PNG IconFile is used as it is'
+        Assert-True (-not $kept.Converted) 'and not converted'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $dir 'icons'))) 'no folder made for it'
+
+        $converted = Resolve-IntuneSvgIconFile -Path $svg -Directory (Join-Path $dir 'icons')
+        Assert-True $converted.Converted ("converted: {0}" -f $converted.Warning)
+        Assert-Like ((Join-Path $dir 'icons') + '\*\icon.png') $converted.Path 'a copy in its own folder under -Directory'
+        Assert-Equal '256x512' (Get-PDPngSize -Path $converted.Path) 'rendered from the SVG'
+        Assert-True (Test-Path -LiteralPath $svg) 'the repo SVG itself is untouched'
+
+        $broken = Join-Path $dir 'broken.svg'
+        [System.IO.File]::WriteAllText($broken, '<svg xmlns="http://www.w3.org/2000/svg"><rect')
+        $failed = Resolve-IntuneSvgIconFile -Path $broken
+        Assert-Equal '' $failed.Path 'no icon'
+        Assert-Like "*'$broken' was not converted*" $failed.Warning 'names the IconFile'
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 
