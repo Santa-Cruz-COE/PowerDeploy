@@ -1,0 +1,21 @@
+Found Microsoft Visual Studio Code [Microsoft.VisualStudioCode]
+Version: 1.141.0
+Publisher: Microsoft Corporation
+Publisher Url: https://www.microsoft.com/
+Moniker: vscode
+Description: Microsoft Visual Studio Code is a code editor redefined and optimized for building and debugging modern web and cloud applications. Microsoft Visual Studio Code is free and available on your favorite platform - Linux, macOS, and Windows.
+Homepage: https://code.visualstudio.com/
+License: Microsoft Software License
+License Url: https://code.visualstudio.com/license
+Privacy Url: https://privacy.microsoft.com/
+Release Notes Url: https://code.visualstudio.com/updates/v1_141
+Tags:
+  developer-tools
+  editor
+Installer:
+  Installer Type: inno
+  Installer Locale: en-US
+  Installer Url: https://vscode.download.prss.microsoft.com/dbazure/download/stable/2a59476c9bfcb90b3ddc372c36762471b7dfad1c/VSCodeUserSetup-x64-1.141.0.exe
+  Installer SHA256: e377a8e2e081a4b59dfd19514abdf4f35aa95aa697e217ad819a0fccff11c602
+  Release Date: 2026-10-06
+  Offline Distribution Supported: true

@@ -1,0 +1,10 @@
+Gefunden Microsoft Visual Studio Code [Microsoft.VisualStudioCode]
+Version: 1.141.0
+Herausgeber: Microsoft Corporation
+Herausgeber-URL: https://www.microsoft.com/
+Moniker: vscode
+Beschreibung: Microsoft Visual Studio Code ist ein Code-Editor.
+Startseite: https://code.visualstudio.com/
+Lizenz: Microsoft Software License
+Installationsprogramm:
+  Installationstyp: inno

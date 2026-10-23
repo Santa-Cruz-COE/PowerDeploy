@@ -1,12 +1,13 @@
 {
   "Applications": [
   {
-    "ApplicationName": "Visual_Studio_Code",
+    "ApplicationName": "Visual Studio Code",
     "InstallMethod": "WinGet",
-    "WinGetID": "Microsoft.VisualStudioCode"
+    "WinGetID": "Microsoft.VisualStudioCode",
+    "IconUrl": "https://code.visualstudio.com/assets/branding/code-stable.png"
   },
   {
-    "ApplicationName": "Microsoft_Office365--Word-Excel-PowerPoint",
+    "ApplicationName": "Microsoft Office365 -- Word-Excel-PowerPoint Only",
     "InstallMethod": "Custom_Script",
     "CustomScriptArgs": "-IncludedApps \"Excel,Word,PowerPoint\"",
     "ScriptPathFromRepoRoot": "Installers\\InstallApp-MS_Office-FullClean.ps1",
@@ -14,7 +15,7 @@
     "DisplayName": "Microsoft 365 Apps for enterprise - en-us"
   },
   {
-    "ApplicationName": "Microsoft_Office365--AllApps",
+    "ApplicationName": "Microsoft Office365 -- All Apps",
     "InstallMethod": "Custom_Script",
     "CustomScriptArgs": "-IncludedApps \"All\"",
     "ScriptPathFromRepoRoot": "Installers\\InstallApp-MS_Office-FullClean.ps1",
@@ -22,7 +23,7 @@
     "DisplayName": "Microsoft 365 Apps for enterprise - en-us"
   },
   {
-    "ApplicationName": "Adobe_Creative_Cloud",
+    "ApplicationName": "Adobe Creative Cloud",
     "InstallMethod": "URL_Download",
     "WinGetID": "Adobe.CreativeCloud",
     "DownloadURL": "https://prod-rel-ffc-ccm.oobesaas.adobe.com/adobe-ffc-external/core/v1/wam/download?sapCode=KCCC&wamFeature=nuj-live",
@@ -34,7 +35,7 @@
     "UninstallType":"All"
   },
   {
-    "ApplicationName": "Adobe_Acrobat_Pro",
+    "ApplicationName": "Adobe Acrobat Pro",
     "InstallMethod": "URL_Download",
     "DownloadURL": "https://trials.adobe.com/AdobeProducts/APRO/Acrobat_HelpX/win32/Acrobat_DC_Web_x64_WWMUI.zip",
     "DownloadType": "ZIP",
@@ -51,9 +52,17 @@
   },
   {
     "ApplicationName": "7-Zip",
-    "InstallMethod": "WinGet",
+    "InstallMethod": "URL_Download",
     "WinGetID": "7zip.7zip",
-    "UninstallType": "Remove-App-WinGet"
+    "DownloadURL": "https://github.com/ip7z/7zip/releases/download/26.04/7z2604-x64.msi",
+    "DownloadType": "FILE",
+    "InstallType": "MSI",
+    "DisplayName": "7-Zip",
+    "DetectMethod": "MSI_Registry",
+    "UninstallType": "Remove-App-WinGet",
+    "AppDescription": "A file archiver with a high compression ratio.",
+    "Publisher": "Igor Pavlov",
+    "InformationUrl": "https://7-zip.org/download.html"
   },
   {
     "ApplicationName": ".NET_3.5",
@@ -62,7 +71,7 @@
     "CustomScriptArgs": "-Version \"3.5\""
   },
   {
-    "ApplicationName": "Dell_CommandUpdate",
+    "ApplicationName": "Dell Command Update",
     "InstallMethod": "Custom_Script",
     "ScriptPathFromRepoRoot": "Installers\\InstallApp-DellCommandUpdate-FullClean.ps1",
     "UninstallType": "All",
@@ -70,22 +79,22 @@
     "DisplayName": "Dell Command"
   },
   {
-    "ApplicationName": "Google_Chrome",
+    "ApplicationName": "Google Chrome",
     "InstallMethod": "WinGet",
     "WinGetID": "Google.Chrome"
   }, 
   {
-    "ApplicationName": "Company_Portal",
+    "ApplicationName": "Company Portal",
     "InstallMethod": "WinGet",
     "WinGetID": "9WZDNCRFJ3PZ"
   }, 
   {
-    "ApplicationName": "Zoom_Workplace_EXE",
+    "ApplicationName": "Zoom Workplace EXE",
     "InstallMethod": "WinGet",
     "WinGetID": "Zoom.Zoom.EXE"
   }, 
   {
-    "ApplicationName": "Zoom_Workplace_MSI",
+    "ApplicationName": "Zoom Workplace MSI",
     "InstallMethod": "WinGet",
     "WinGetID":"Zoom.Zoom"
   }, 
@@ -95,7 +104,7 @@
     "WinGetID": "Romanitho.Winget-AutoUpdate"
   }, 
   {
-    "ApplicationName": "HEIF Image Extension (for .HEIC, .HIF, and .HEIF files)",
+    "ApplicationName": "HEIF Image Extension for .HEIC .HIF and .HEIF files",
     "InstallMethod": "WinGet",
     "WinGetID": "9PMMSR1CGPWG"
   }, 
@@ -103,6 +112,19 @@
     "ApplicationName": "Logi Options+",
     "InstallMethod": "WinGet",
     "WinGetID": "Logitech.OptionsPlus"
+  },
+  {
+    "ApplicationName": "Spotify",
+    "InstallMethod": "WinGet",
+    "WinGetID": "Spotify.Spotify"
+  },
+  {
+    "ApplicationName": "LibreOffice",
+    "InstallMethod": "WinGet",
+    "WinGetID": "TheDocumentFoundation.LibreOffice",
+    "AppDescription": "Free, open source office suite: Writer, Calc, Impress and Draw. Setup's bulk printer tools offer it for editing their CSV sheets on PCs without a spreadsheet program.",
+    "Publisher": "The Document Foundation",
+    "IconUrl": "https://upload.wikimedia.org/wikipedia/commons/4/48/LibreOffice_7.5_Main_Icon.svg?utm_source=commons.wikimedia.org&utm_campaign=index&utm_content=original"
   },
   {
     "ApplicationName": "MSI-Private-AzureBlob_Example",

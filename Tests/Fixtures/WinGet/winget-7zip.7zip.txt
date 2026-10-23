@@ -1,0 +1,38 @@
+Found 7-Zip [7zip.7zip]
+Version: 26.04
+Publisher: Igor Pavlov
+Publisher Url: https://7-zip.org/
+Publisher Support Url: https://7-zip.org/support.html
+Author: Igor Pavlov
+Moniker: 7zip
+Description: A file archiver with a high compression ratio.
+Homepage: https://7-zip.org/download.html
+License: LGPL-2.1
+License Url: https://7-zip.org/license.txt
+Copyright: Copyright © 1999-2026 Igor Pavlov.
+Release Notes: - Some bugs and vulnerabilities were fixed.
+Release Notes Url: https://github.com/ip7z/7zip/releases/tag/26.04
+Documentation:
+  FAQ: https://7-zip.org/faq.html
+Tags:
+  7zfiles
+  archive
+  archiver
+  compress
+  compression
+  decompress
+  decompression
+  extract
+  extractor
+  rarfiles
+  targzfiles
+  unarchive
+  unarchiver
+  unzip
+  zip
+Installer:
+  Installer Type: wix
+  Installer Url: https://www.7-zip.org/a/7z2604-x64.msi
+  Installer SHA256: 0b01334a418654293513449f61d6bfc99e5196ca371e3c3dc961eda57cd535c6
+  Release Date: 2026-10-06
+  Offline Distribution Supported: true

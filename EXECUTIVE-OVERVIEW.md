@@ -33,16 +33,17 @@ flowchart LR
 
 ## What it is *not* (the common misconceptions)
 
-- **It is not a cloud service, and there is no "cloud computing" in it.** Nothing runs in the cloud. The cloud pieces are a file cabinet (Azure storage) and an instruction manual (GitHub). All the actual work happens on each computer.
+- **It is not a cloud service, and there is no "cloud computing" in it.** Nothing runs in the cloud. The cloud pieces are a file cabinet (Azure storage) and an instruction manual (GitHub). Some software is downloaded directly from its maker's official site, the same way a technician would download it by hand. All the actual work happens on each computer.
 - **There is no server** — nothing new to patch, back up, or fail over. If one computer has a problem, it affects that one computer.
 - **There is no subscription or per-device fee.** The only new cost is file storage — a few dollars per month for the whole organization.
-- **It does not touch student data.** It installs printers and applications; that is all it does.
+- **It does not touch student data.** It installs printers and applications; that is all it does. (The optional publishing shortcut below can technically see who belongs to which group, because Microsoft bundles that with reading group names; PowerDeploy only ever reads a group's name and ID.)
 - **It does not report anywhere.** Records of what was installed, when, and whether it worked stay on each machine, available for inspection.
 
 ## Is it safe?
 
 - Computers can only **read** files from storage, using access links that **expire** and can be replaced on a schedule. Those links are kept in a locked area of Windows that only administrators can access.
 - Every instruction a computer follows comes from a **version-controlled library with a complete change history** — we can always answer "what changed, when, and who changed it." Only authorized staff can change that library.
+- **Publishing shortcut for administrators (optional).** Setup can add a new printer or app to Intune for the administrator, instead of them copying details into Microsoft's portal by hand. It uses a dedicated Microsoft sign-in limited to Intune's app area (apps and their app settings) plus reading groups. That sign-in is kept only on the administrator's own computer, locked to their Windows account, and expires after a set period (six months by default, chosen at setup). **The computers being managed never receive it.** Because it can publish software, it is protected like any administrator password; where our policy requires a second administrator to approve app changes, its changes are exempted from that approval — a setting an administrator makes deliberately and can reverse. Intune records apps published this way under the shortcut's name; the record of which administrator ran it stays on that administrator's computer.
 - Unlike the built-in deployment tools it replaces, PowerDeploy is **not a black box**: every step of every install is verified and written to a readable log. When something fails, we can see exactly why.
 
 ## Track record
@@ -58,5 +59,5 @@ The system does its job well; the current work is making it easier for *people*:
 **Three questions we hear most:**
 
 1. **"Is there a cloud compute cost we're not seeing?"** No. Nothing executes in the cloud, so there is nothing metered to pay for. The Azure bill is file storage only — single-digit dollars per month.
-2. **"What happens if GitHub or Azure is unreachable?"** Nothing breaks. Printers and software already installed keep working — the system is only involved when something new is installed or repaired. New installs simply wait until the connection returns.
-3. **"Who can change what gets installed on our computers?"** Only staff with write access to our script library and file storage — and every change is recorded with author, date, and content. We treat that access with the same care as any administrative credential.
+2. **"What happens if GitHub or Azure is unreachable?"** Nothing that is already installed breaks — printers and software keep working. New installs wait until the connection returns. In the meantime, Intune's status reports may temporarily show errors, because the routine checks that confirm each item is still in place also need to reach GitHub.
+3. **"Who can change what gets installed on our computers?"** Only staff with write access to our script library and file storage — and every change is recorded with author, date, and content — plus, where the optional publishing shortcut is set up, the administrators whose computers hold its sign-in, and the senior Microsoft 365 administrators who are able to issue a new one. We treat all of that access with the same care as any administrative credential.

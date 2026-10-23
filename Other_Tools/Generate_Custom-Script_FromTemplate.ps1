@@ -21,6 +21,7 @@ param(
     #[hashtable]$ScriptParams,
     [string]$ScriptParamsBase64,
     [string]$CustomNameModifier,
+    [string]$RequireOrgKeys='', # '' (no check), 'Printers' or 'Applications'. Always injected so the stamped script never inherits a leftover value.
     [string]$TemplateScript="GitRunnerScript"
 )
 
@@ -39,6 +40,7 @@ $RepoBranch = "'" +    $RepoBranch + "'"
 $WorkingDirectory = "'" +    $WorkingDirectory + "'"
 $ScriptPath = "'" +    $ScriptPath + "'"
 $ScriptParamsBase64 = "'" +    $ScriptParamsBase64 + "'"
+$RequireOrgKeys = "'" +    $RequireOrgKeys + "'"
 
     # $RepoNickName
     # $RepoUrl
@@ -89,6 +91,8 @@ if ($TemplateScript -eq "GitRunnerScript"){
     # The template's param() block gets stripped below, so explicitly clear $ScriptParams
     # to keep the script from inheriting a leftover session variable via dynamic scoping
     $ScriptParamsReset_DEC = '$ScriptParams = $null'
+    # Same reason: always declare $RequireOrgKeys (empty = no org registry check)
+    $RequireOrgKeys_DEC = '$RequireOrgKeys = '+$RequireOrgKeys
 
 
 # --- config for GitRunnerScript ---
@@ -104,6 +108,7 @@ $NewCode      = @"
     $StashChanges_DEC
     $ScriptParamsReset_DEC
     $ScriptParamsBase64_DEC
+    $RequireOrgKeys_DEC
 
 # --- injected code end ---
 "@

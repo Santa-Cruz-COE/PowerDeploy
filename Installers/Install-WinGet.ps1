@@ -182,9 +182,9 @@ Function TestWinGet {
         #& $WinGet --info --accept-source-agreements| out-null
 
 
-        #& $winget search "7zip.7zip" --accept-source-agreements | out-null # this function will force accept of source agreements
+        #& $winget search "Microsoft.PowerShell" --accept-source-agreements | out-null # this function will force accept of source agreements
         
-        $WinGetSearchCommand = "& "+"'"+"$winget"+"'"+" search '7zip.7zip' --accept-source-agreements"
+        $WinGetSearchCommand = "& "+"'"+"$winget"+"'"+" search 'Microsoft.PowerShell' --accept-source-agreements"
         Start-Process powershell.exe -Wait -NoNewWindow -ArgumentList @(
             '-NoProfile',
             '-ExecutionPolicy', 'Bypass',
@@ -404,7 +404,7 @@ Function Check-WinGet{
                         Write-Log "Current user: $whoami"
                         Write-Log "Running test..."
                         #& $WinGet --info --accept-source-agreements| out-null
-                        & $winget search "7zip.7zip" --accept-source-agreements | out-null # this function will force accept of source agreements
+                        & $winget search "Microsoft.PowerShell" --accept-source-agreements | out-null # this function will force accept of source agreements
                         Write-Log "WinGet working at target destination."
                         Return $True
 

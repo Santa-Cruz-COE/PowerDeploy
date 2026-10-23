@@ -1,4 +1,10 @@
 ﻿<#
+!!! UNTESTED - NOT VALIDATED END TO END (2026-10-14) !!!
+This print-server migration tool has not been tested end to end (export -> convert -> install).
+Review every output by hand before it goes anywhere near the live printer JSON or blob storage.
+Note: the printer installer now REFUSES duplicate PrinterName entries, so check the output for them.
+Tracking: GitHub issue 'Test print-server migration tools end to end'.
+
 
 INSTRUCTIONS:
 To run the script, you'll need to:
@@ -11,6 +17,12 @@ Collect detailed information about each printer's port and driver
 Export the data to both a CSV file and display it in the console
 
 #>
+
+Write-Host ''
+Write-Host '!!! UNTESTED TOOL: this print-server migration script has not been validated end to end.' -ForegroundColor Yellow
+Write-Host '    Review every output by hand before using it. Duplicate PrinterName entries will be rejected by the installer.' -ForegroundColor Yellow
+Write-Host ''
+
 
 $ThisFileName = $MyInvocation.MyCommand.Name
 $RepoRoot = (Split-Path $PSScriptRoot -Parent)
@@ -147,16 +159,47 @@ Try {
         #   PresetDriver    - SUGGESTED code linking this printer to a driver.
         #                     Rename to match your convention; printers sharing a
         #                     driver should share the same PresetDriver value.
+        # COLUMN CONVENTION
+        #   *_EXCLUDED        - reference only, never written to the JSON.
+        #   everything else   - carried into each printer object in the JSON,
+        #                       UNLESS the column is empty in every row, in which
+        #                       case it is dropped. So add your own columns
+        #                       freely; empty ones cost nothing.
         $paddedIP = Get-PaddedIP -IP $port.PrinterHostAddress
         $printerInfo = [PSCustomObject]@{
-            PrinterName     = $printer.Name
-            PrinterIP       = $port.PrinterHostAddress
-            PortName        = if ($paddedIP) { $paddedIP } else { $printer.PortName }
-            PortName_Raw    = $printer.PortName
-            PortName_Padded = $paddedIP
-            PresetDriver    = Get-PresetDriverCode -DriverName $printer.DriverName
-            DriverName      = $printer.DriverName
-            INFFile         = $driver.InfPath
+            PrinterName              = $printer.Name
+            PrinterIP                = $port.PrinterHostAddress
+            PortName                 = if ($paddedIP) { $paddedIP } else { $printer.PortName }
+            PortName_Raw_EXCLUDED    = $printer.PortName
+            PortName_Padded_EXCLUDED = $paddedIP
+            PresetDriver             = Get-PresetDriverCode -DriverName $printer.DriverName
+            DriverName               = $printer.DriverName
+            # INFFile must be the BARE FILENAME, not a path. The installer builds
+            # "$EXTRACTED_LocalDriverZipPath\$INFFile" to find the INF inside the
+            # extracted DriverZip, so a full path here (Get-PrinterDriver returns
+            # InfPath as e.g. C:\Windows\System32\DriverStore\FileRepository\
+            # kobxxk__01.inf_amd64_<hash>\kobxxk__01.inf) would never resolve, and
+            # it lands in the JSON full of escaped backslashes.
+            INFFile                  = if ($driver.InfPath) { Split-Path $driver.InfPath -Leaf } else { "" }
+            # Reference/debugging: the full Driver Store path is what
+            # Export-PrinterServer-Drivers.ps1 uses to locate the driver package.
+            INFPath_Full_EXCLUDED    = $driver.InfPath
+
+            # --- Fields for you to fill in (all optional) ---------------------
+            # Any of these left empty across EVERY row is dropped from the JSON,
+            # so delete or ignore the ones you do not want.
+            #
+            # Model: NOT obtainable from the print server. Neither Get-Printer nor
+            # Win32_Printer exposes a model, so this is manual. The only automatic
+            # route is an SNMP query to the device itself
+            # (OID 1.3.6.1.2.1.25.3.2.1.3.1 - the same one HP's own UPD uses).
+            Model                    = ""
+            # Location/Comment ARE real print-server fields, so these arrive
+            # pre-filled if whoever set up the queues populated them.
+            Location                 = $printer.Location
+            Comment                  = $printer.Comment
+            Asset                    = ""
+            Department               = ""
         }
     
         # Add to results array
