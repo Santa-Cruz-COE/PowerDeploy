@@ -84,6 +84,7 @@ Function New-IntuneTechnicalNotes {
         [AllowNull()][string]$TargetBranch,
         [AllowNull()][string]$SourceCommit,
         [AllowNull()][object]$Verified,
+        [AllowNull()][string]$WaitsForOrgKeys, # Optional. Adds one "Waits for org keys" line only when passed; callers that omit it get unchanged Notes.
         [AllowNull()][string]$SourceRepoRoot
     )
 
@@ -115,6 +116,10 @@ Function New-IntuneTechnicalNotes {
     $Lines += ('Source Branch: {0}' -f (ConvertTo-IntuneFieldText -Value $SourceBranch))
     $Lines += ('Source Commit: {0}' -f (ConvertTo-IntuneFieldText -Value $SourceCommit))
     $Lines += ('Verified: {0}'      -f (ConvertTo-IntuneFieldText -Value $Verified))
+    if ($PSBoundParameters.ContainsKey('WaitsForOrgKeys')) {
+        # Whether the install command carries -RequireOrgKeys (Git-Runner exits 1618 = Intune retry until the org registry values exist)
+        $Lines += ('Waits for org keys: {0}' -f (ConvertTo-IntuneFieldText -Value $WaitsForOrgKeys))
+    }
 
     return ($Lines -join "`r`n")
 }
@@ -268,6 +273,7 @@ Function New-PDPrinterIntuneMetadata {
 
         [hashtable]$FunctionParams = @{
             PrinterName = $PrinterName
+            RequireOrgKeys = 'Printers' # Always: the printer catalog and driver zips are private. Git-Runner exits 1618 (Intune retry) until the org registry values exist.
         }
 
 
@@ -362,7 +368,7 @@ Function New-PDPrinterIntuneMetadata {
     # Intune text, built once before any publishing choice (spec 5.1 step 2). Description is what
     # users see in the Company Portal; Notes is the admin-only technical block (spec 4.2 / 4.4).
     $PrinterDescriptionText = New-IntunePrinterDescription -Department $Department -Location $Location -Model $Model -Asset $Asset -PrinterIP $PrinterIP
-    $PrinterTechnicalNotes  = New-IntuneTechnicalNotes -TargetRepo $RepoUrl -TargetBranch $RepoBranch -SourceCommit $CurrentGitVer -Verified $Verified -SourceRepoRoot $RepoRoot
+    $PrinterTechnicalNotes  = New-IntuneTechnicalNotes -TargetRepo $RepoUrl -TargetBranch $RepoBranch -SourceCommit $CurrentGitVer -Verified $Verified -SourceRepoRoot $RepoRoot -WaitsForOrgKeys 'Yes'
 
     $IconFileValue = ""
     if (-not [string]::IsNullOrWhiteSpace($IconPath)) {

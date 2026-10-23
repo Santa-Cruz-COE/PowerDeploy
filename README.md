@@ -239,11 +239,14 @@ The central design decision is **decoupling orchestration from payload hosting**
 When an endpoint runs the package (in **SYSTEM** context), the runner:
 
 1. **Decodes its parameters** — Intune-friendly Base64-encoded JSON is decoded into a normal PowerShell parameter string. This happens first; if decoding fails, the runner stops.
+   - **Waits for the organization registry values, when the install needs them** — install commands for printers, and for apps that use the private catalog or Blob storage (directly or through a prerequisite), carry `-RequireOrgKeys 'Printers'` or `'Applications'`. Before Git is installed or the repo is cloned, the runner checks that the matching values under `HKLM\SOFTWARE\PowerDeploy` exist. If any is missing (for example early in Autopilot, before the script that writes them has run), it exits **`1618`**, which Intune treats as **Retry**: three more attempts, five minutes apart. Only value names are logged, never the values. Setup decides when to add the switch; detection, uninstall and public-catalog app commands never carry it.
 2. **Ensures Git is present** — installs Git for Windows if missing, guarded by a named mutex so parallel deployments don't collide.
 3. **Clones or pulls** the target repo into the working directory (e.g. `C:\ProgramData\PowerDeploy--<MODE>\PowerDeploy-Repo`), stashing any local drift first.
 4. **Locks down permissions** — runs [`Security_Manager.ps1`](Other_Tools/Security_Manager.ps1) to enforce strict ACLs (SYSTEM + Administrators only) on the working folders, the Intune Management Extension log folder (`C:\ProgramData\Microsoft\IntuneManagementExtension\Logs`), and the `HKLM\SOFTWARE\PowerDeploy` registry hive.
 5. **Invokes the target script** (an installer, uninstaller, printer install, etc.) with the decoded parameters, capturing every line of output, then runs the Security Manager again.
 6. **Logs and exits** with `0` on success or `1` on any failure. The target script's own exit code is written to the Git log but is not passed through to Intune.
+
+The one other exit code is `1618` from the registry-values check above, so a `1618` from PowerDeploy always means "organization registry values not there yet". Install commands with the switch end in `; exit $LASTEXITCODE`, because Windows PowerShell 5.1 would otherwise report the runner's `1618` to Intune as `1` (Failed). That check exists only in packages built after it was added: the runner on a device is the copy inside its `.intunewin`, and an older runner given `-RequireOrgKeys` ignores it and installs exactly as before.
 
 Because the runner *pulls the latest commit each time it runs*, iterating on a deployment is just editing a script and committing — the Intune app entry never changes.
 

@@ -1778,7 +1778,7 @@ Function WindowsApp--InTune-Setup{
     # SearchJSONForApp copies the chosen entry's properties into global scope and never clears
     # the ones an entry does not have, so an app without an AppDescription would inherit the
     # previous selection's. Clear the optional fields first (spec I04).
-    foreach ($StaleField in @('AppDescription', 'Category', 'Verified', 'Publisher', 'PackagedVersion', 'Version', 'PreRequisites', 'DisplayName', 'WinGetID', 'InformationUrl', 'PrivacyUrl', 'IconUrl', 'IconFile')) {
+    foreach ($StaleField in @('AppDescription', 'Category', 'Verified', 'Publisher', 'PackagedVersion', 'Version', 'PreRequisites', 'DisplayName', 'WinGetID', 'InformationUrl', 'PrivacyUrl', 'IconUrl', 'IconFile', 'PDAppCatalogSource', 'PDAppPrereqCatalogInfo')) {
         Remove-Variable -Name $StaleField -Scope Global -ErrorAction SilentlyContinue
         Remove-Variable -Name $StaleField -Scope Script -ErrorAction SilentlyContinue
     }
@@ -2328,6 +2328,20 @@ Function WindowsApp--InTune-Setup{
     # }
 
 
+    # Org registry values: decided here, when the command is generated - Git-Runner never guesses.
+    # Yes = the install command gets -RequireOrgKeys 'Applications', so Git-Runner exits 1618 (Intune retry)
+    # until the org registry values exist on the device.
+    $AppOrgKeysDecision = Get-PDAppOrgKeysDecision -CatalogSource $Global:PDAppCatalogSource -InstallMethod $InstallMethod -PrereqCatalogInfo $Global:PDAppPrereqCatalogInfo
+    if ($AppOrgKeysDecision.Required) {
+        $FunctionParams.Add("RequireOrgKeys", "Applications")
+        $AppWaitsForOrgKeys = "Yes"
+    } else {
+        $AppWaitsForOrgKeys = "No"
+    }
+    Write-Log "" "INFO2"
+    Write-Log "Waits for organization registry keys: $AppWaitsForOrgKeys ($($AppOrgKeysDecision.Reason))" "INFO2"
+
+
     Write-Log "" "INFO2"
     Write-Log "Final method results:" "INFO2"
     Write-Log "   Install Method: $InstallMethod" "INFO2"
@@ -2615,7 +2629,7 @@ Function WindowsApp--InTune-Setup{
         'Packaged Version' = $PackagedVersion
         'PreRequisites'    = $PreRequisites
     }
-    $AppTechnicalNotes = New-IntuneTechnicalNotes -AppFields $AppNotesFields -TargetRepo $RepoUrl -TargetBranch $Global:RepoBranch -SourceCommit $CurrentGitVer -Verified $Verified -SourceRepoRoot $RepoRoot
+    $AppTechnicalNotes = New-IntuneTechnicalNotes -AppFields $AppNotesFields -TargetRepo $RepoUrl -TargetBranch $Global:RepoBranch -SourceCommit $CurrentGitVer -Verified $Verified -SourceRepoRoot $RepoRoot -WaitsForOrgKeys $AppWaitsForOrgKeys
 
     # AppVersion: PackagedVersion, else Version, else the PowerDeploy commit - like printers, and
     # never WinGet's version, because WinGet installs whatever is latest on each device.
@@ -3705,6 +3719,84 @@ Function WindowsApp--Install-Local{
 
 }
 
+# Org registry keys decision for the Intune app wizard (build plan org-keys-retry section 4.5).
+# Neither name contains "--", so neither becomes a menu item.
+Function Get-PDAppPrereqCatalogInfo {
+    param(
+        [AllowNull()][object]$PreRequisites,
+        [AllowNull()][object[]]$PublicApps,
+        [AllowNull()][object[]]$PrivateApps
+    )
+
+    # One entry per prerequisite: Name, Source (Public / Private / NotFound), InstallMethod.
+    # Public first, then private: the installer's own lookup order (a public entry shadows a private one).
+    # Split on ',' and trimmed, one level deep, exactly like General_JSON-App_Installer.ps1.
+    $Info = @()
+    foreach ($RawPrereqs in @($PreRequisites)) {
+        foreach ($Part in ([string]$RawPrereqs -split ',')) {
+            $Name = $Part.Trim()
+            if ([string]::IsNullOrWhiteSpace($Name) -or $Name -eq 'N/A') { continue }
+
+            $Source = 'Public'
+            $Entry = @($PublicApps | Where-Object { $null -ne $_ -and $_.ApplicationName -eq $Name }) | Select-Object -First 1
+            if ($null -eq $Entry) {
+                $Source = 'Private'
+                $Entry = @($PrivateApps | Where-Object { $null -ne $_ -and $_.ApplicationName -eq $Name }) | Select-Object -First 1
+            }
+            if ($null -eq $Entry) { $Source = 'NotFound' }
+
+            $Info += [pscustomobject]@{
+                Name          = $Name
+                Source        = $Source
+                InstallMethod = $(if ($null -ne $Entry) { [string]$Entry.InstallMethod } else { '' })
+            }
+        }
+    }
+
+    return $Info
+}
+
+Function Get-PDAppOrgKeysDecision {
+    param(
+        [AllowNull()][string]$CatalogSource,
+        [AllowNull()][string]$InstallMethod,
+        [AllowNull()][object[]]$PrereqCatalogInfo
+    )
+
+    # Required when ANY is true: the app is in the private catalog; it uses a Blob install method; a
+    # prerequisite is in the private catalog (or not in the public one, which sends the installer to the
+    # private catalog) or uses a Blob install method. Anything unknown counts as required.
+    $BlobMethods = @('MSI-Private-AzureBlob', 'EXE-Private-AzureBlob')
+    $Reasons = @()
+
+    if ($CatalogSource -eq 'Private') {
+        $Reasons += 'app is in the private catalog'
+    } elseif ($CatalogSource -ne 'Public') {
+        $Reasons += 'app catalog source unknown'
+    }
+
+    if ($BlobMethods -contains $InstallMethod) {
+        $Reasons += "InstallMethod is $InstallMethod"
+    }
+
+    foreach ($Prereq in @($PrereqCatalogInfo)) {
+        if ($null -eq $Prereq) { continue }
+        if ($Prereq.Source -eq 'Private') {
+            $Reasons += "prerequisite '$($Prereq.Name)' is in the private catalog"
+        } elseif ($Prereq.Source -ne 'Public') {
+            $Reasons += "prerequisite '$($Prereq.Name)' is not in the public catalog"
+        } elseif ($BlobMethods -contains [string]$Prereq.InstallMethod) {
+            $Reasons += "prerequisite '$($Prereq.Name)' uses $($Prereq.InstallMethod)"
+        }
+    }
+
+    if ($Reasons.Count -gt 0) {
+        return [pscustomobject]@{ Required = $true; Reason = ($Reasons -join '; ') }
+    }
+
+    return [pscustomobject]@{ Required = $false; Reason = 'public catalog app, no Blob install method, public prerequisites only' }
+}
+
 Function SearchJSONForApp {
 
         param(
@@ -3718,6 +3810,7 @@ Function SearchJSONForApp {
 
             Write-Log "Found $AppNameToSearch in public JSON data." "INFO2"
             $AppData = $PublicJSONdata.applications | Where-Object { $_.ApplicationName -eq $AppNameToSearch }
+            $Global:PDAppCatalogSource = 'Public'
 
             Write-log "Application data for $AppNameToSearch retrieved from public JSON:" "INFO2"
             $Output = ($AppData | ConvertTo-Json -Depth 10)
@@ -3748,6 +3841,7 @@ Function SearchJSONForApp {
 
             Write-Log "Found $AppNameToSearch in private JSON data." "INFO2"
             $AppData = $PrivateJSONdata.applications | Where-Object { $_.ApplicationName -eq $AppNameToSearch }
+            $Global:PDAppCatalogSource = 'Private'
 
             Write-log "Application data for $AppNameToSearch retrieved from private JSON:" "INFO2"
             $Output = ($AppData | ConvertTo-Json -Depth 10)
@@ -3778,6 +3872,15 @@ Function SearchJSONForApp {
             # Return $null
             Throw
 
+        }
+
+        # Where each prerequisite resolves, captured now because both catalogs only exist inside
+        # Select-ApplicationFromJSON. Read by the Intune app wizard's org registry keys decision.
+        # A failure here must never look like "app not found" to the caller, so it is caught.
+        try {
+            $Global:PDAppPrereqCatalogInfo = Get-PDAppPrereqCatalogInfo -PreRequisites $AppData.PreRequisites -PublicApps $PublicJSONdata.applications -PrivateApps $PrivateJSONdata.Applications
+        } catch {
+            $Global:PDAppPrereqCatalogInfo = @([pscustomobject]@{ Name = '(prerequisites could not be checked)'; Source = 'Unknown'; InstallMethod = '' })
         }
 
         # Exit without a return cuz it is too messy

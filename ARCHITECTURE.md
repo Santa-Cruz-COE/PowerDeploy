@@ -33,12 +33,15 @@ Every Intune "Win32 app" PowerDeploy creates contains exactly **one file**: `Git
 At install time on the endpoint (running as SYSTEM), Git-Runner:
 
 1. Decodes its parameters (Base64-encoded JSON — see §5.4).
+   - If the command carries `-RequireOrgKeys 'Printers'` or `'Applications'`: checks, read-only and in the 64-bit registry view, that the org registry values that install needs (§4.1: `StorageAccountName` plus that area's SAS key and JSON path) are present and non-empty. Any missing → exits **1618** (Intune: Retry) before Git is installed or anything is cloned. Only value names and present/missing are logged. Empty or absent switch = no check; any other value exits 1.
 2. Installs Git for Windows if missing (serialized fleet-wide by a global named mutex `Global\PowerDeploy_GitInstall`, with abandoned-mutex recovery, because concurrent Autopilot ESP installs once raced each other).
 3. Clones or updates the organization's PowerDeploy repository into the working directory (`C:\ProgramData\PowerDeploy--<MODE>\PowerDeploy-Repo`), stashing local drift, switching branch if requested.
 4. Ensures the `HKLM\SOFTWARE\PowerDeploy` registry key exists.
 5. Runs `Other_Tools\Security_Manager.ps1` to enforce strict ACLs on the working folders and the registry key (see §7).
 6. Executes the requested repo script (e.g. `Installers\General_JSON-App_Installer.ps1`) with the decoded parameters.
 7. Reports the child script's exit code (0/1) back to Intune, after a second Security Manager pass.
+
+**Ordering tolerance (org registry values).** No Intune feature guarantees that the org-config writer runs before PowerDeploy's Win32 apps during Autopilot (ESP tracks Win32 apps, not scripts; one shared dependency for every app exceeds the dependency-graph limit). So installs that need the values wait for them instead: the generator adds `-RequireOrgKeys` to the **install** command only, decided in Setup when the command is generated (printers: always; apps: private catalog, `MSI-`/`EXE-Private-AzureBlob`, or a prerequisite that is private or Blob — one level deep). Git-Runner never guesses. Generated custom (stamped) copies always get `$RequireOrgKeys` injected, empty when not requested, so a leftover session variable can never turn the check on. The check exists only in packages built after it was added (2026-10): an older packaged Git-Runner given the switch swallows it into `$ScriptParams`, the Base64 payload wins, and it installs exactly as before without the check.
 
 ```mermaid
 flowchart LR
@@ -65,6 +68,8 @@ The generated install command has this exact shape (one line):
 ```
 
 `Sysnative` is deliberate and load-bearing: it escapes Intune's 32-bit management-extension context into 64-bit PowerShell. Do not "simplify" it away.
+
+Install commands that carry `-RequireOrgKeys` (below) end differently: `... -RequireOrgKeys '<Printers|Applications>'; exit $LASTEXITCODE"`. The `; exit $LASTEXITCODE` is also load-bearing: under `powershell.exe -Command`, Windows PowerShell 5.1 reports a script's `Exit 1618` as process exit code **1** (tested 2026-10-23), which Intune would treat as Failed instead of Retry. Passing `$LASTEXITCODE` back out keeps 1618, 0 and 1 exactly, and an uncaught error still exits 1. Commands without the switch are unchanged.
 
 ---
 
@@ -220,6 +225,7 @@ On the **admin workstation**, Setup.ps1's wizards emit artifacts to sibling fold
 This contract is the API between every component (and between PowerDeploy and Intune):
 
 - Every script: `0` = success, `1` = failure. Nothing else is meaningful.
+- **One exception, Git-Runner only: `1618` = organization registry values not present yet** (§2, `-RequireOrgKeys`). Intune treats 1618 as **Retry** (three more attempts, five minutes apart); the automatic uploader publishes it as `retry` on every app it creates and guided mode keeps Intune's default return codes, which include it. Git-Runner collapses every target-script exit code to `1`, so a 1618 from PowerDeploy can only mean this. It reaches Intune only because those install commands end in `; exit $LASTEXITCODE` (§2); without it the process exit code would be 1. If the values never arrive, the app ends Failed after its retries, and Intune offers it again on its normal re-evaluation cycle.
 - **Detection scripts:** `0` = **detected / present**, `1` = not detected. (So uninstall verification succeeds on a *nonzero* detection result.)
 - The MSI/EXE engines treat `3010` (reboot required) as success; the URL engine defaults to `0` only unless the catalog entry supplies `ExpectedExitCodes`.
 - "Already installed" exits `0` (installs are idempotent). "Was never installed" exits `0` from the uninstaller (removals are idempotent). This is deliberate: Intune retries safely.
@@ -243,6 +249,7 @@ Split on `],[` boundaries; four `-Param "value"` pairs per group; doubled quotes
 1. Admin assigns the Win32 app (payload: Git-Runner only) to a device group.
 2. Intune runs the **detection script** (a parameter-stamped Git-Runner copy targeting the detection template). Exit 1 ⇒ not installed ⇒ proceed.
 3. Intune runs the install command (§2). Git-Runner clones/updates the org fork, locks down ACLs, and executes the target orchestrator with Base64-decoded parameters.
+   - Printer installs, and app installs that need the private catalog or Blob storage, first check the org registry values (`-RequireOrgKeys`, §2). Missing → exit 1618 within a second, Intune retries (§4.5). Detection and uninstall never wait.
 4. The orchestrator resolves the asset in the catalogs, dispatches to an engine, installs, **verifies by re-detection**, and exits 0/1.
 5. Git-Runner propagates the exit code to Intune. Full transcripts of every step are in `Logs\` on the endpoint.
 
@@ -317,6 +324,8 @@ The temporary administrator sign-in (Automatic setup, rotation, removal with rev
 Two Setup menu entries built on the §5.7 credential and uploader, for publishing or cleaning up many printers at once. Both work through a CSV the admin edits, are checked before anything changes, and need a typed confirmation. The CSV opens in whatever program Windows has for `.csv` files. With none: LibreOffice Calc if installed, otherwise an offer (asked once per Setup session, never automatic) to install it as a catalog app: the public catalog's `LibreOffice` entry (`InstallMethod: WinGet`, `TheDocumentFoundation.LibreOffice`) through `General_JSON-App_Installer.ps1`, the same path `WindowsApp--Install-Local` uses. Calc is started with `--infilter="CSV:44,34,76,1,<n>/2..."` (comma, double quote, UTF-8, every column Text) so there is no import dialog and nothing is reformatted. Declined or failed: the built-in editor window (`CsvGrid-Editor_Helpers.ps1`), then Notepad.
 
 **`Printer--InTune-BulkCreate`.** Deploy mode (§6) -> `PrinterData.json` (downloaded from blob, or a local file) -> optional default Required/Available groups -> `draft.csv`, one row per printer. Only `Include`, `RequiredGroups` and `AvailableGroups` are the admin's; `PrinterName` is the key and cannot be edited. Printers that would fail to install (no `PortName`/`PrinterIP`; a `PresetDriver` missing from `drivers[]`; no preset and no own `DriverName`/`INFFile`/`DriverZip`) start with `Include = N` and say why; a duplicate `PrinterName` stops the run, as it does in the wizard. Staging resolves every distinct group once and reports every problem at once. It also lists the existing printer apps, matched by the **PrinterName part of the display name and the same deploy mode**: a PRODUCTION run never touches a development-mode app. For each match the admin chooses override or skip (all / none / one by one). The summary goes to `staged.csv`. On confirmation the `.intunewin` is built **once** (every printer packages the same Git-Runner template), and each printer goes through `New-PDPrinterIntuneMetadata` and the normal uploader. **Override = create the new app first; only when that succeeds, back up and delete the old one.** A failed create never touches the old app, and an old app whose backup cannot be read is never deleted. One printer failing never stops the batch. `results.csv` marks only unfinished printers `Include = Y`, so it can be fed back in as the sheet for a retry.
+
+**Org registry values.** Every printer built here goes through `New-PDPrinterIntuneMetadata`, which always adds `-RequireOrgKeys 'Printers'` to the install command and `Waits for org keys: Yes` to Notes, exactly as the one-printer wizard does (§2, §4.5). The run packages the current Git-Runner once, so every printer in a run after this change carries the check.
 
 **`Printer--InTune-BulkDelete`.** Lists every PowerDeploy printer app (all modes) to `delete.csv`. Rows the admin marks are matched to a fresh list **by AppId only**, each app is backed up (app JSON + assignments) and deleted, and the run continues past failures. This only cleans up Intune: devices keep the printer.
 
@@ -439,6 +448,7 @@ For adopters and contributors — these are known, acknowledged, and sequenced o
 13. **Windows-only, public Azure cloud only** (blob endpoint suffix is hardcoded), GitHub-hosted repos assumed by mode detection.
 14. **The print-server migration tools are untested end to end** (`Export-PrinterServer-CSV.ps1`, `Convert-PrinterCSV-ToJSON.ps1`, `Export-PrinterServer-Drivers.ps1`). Review every output by hand; the printer installer now refuses duplicate `PrinterName` entries, so check converted output for them.
 15. **Intune upload limits:** Win32 app work uses Graph **beta** endpoints, which Microsoft can change; rotation and removal are not yet live-tested; assignment settings beyond intent/target (schedules, notifications, filters, exclusions) are left at Intune's defaults.
+16. **The org-keys wait (§2, §4.5) is bounded and not yet Autopilot-tested.** It covers Intune's retry window only (three retries, five minutes apart); values that arrive later leave the app Failed until Intune's next re-evaluation. It protects only packages built after it was added (2026-10); older `.intunewin` packages install without the check. The app rule resolves prerequisites one level deep (item 7), and a prerequisite missing from the public catalog counts as needing the values.
 
 ---
 
