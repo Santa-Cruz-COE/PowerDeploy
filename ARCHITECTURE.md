@@ -43,6 +43,8 @@ At install time on the endpoint (running as SYSTEM), Git-Runner:
 
 **Ordering tolerance (org registry values).** No Intune feature guarantees that the org-config writer runs before PowerDeploy's Win32 apps during Autopilot (ESP tracks Win32 apps, not scripts; one shared dependency for every app exceeds the dependency-graph limit). So installs that need the values wait for them instead: the generator adds `-RequireOrgKeys` to the **install** command only, decided in Setup when the command is generated (printers: always; apps: private catalog, `MSI-`/`EXE-Private-AzureBlob`, or a prerequisite that is private or Blob — one level deep). Git-Runner never guesses. Generated custom (stamped) copies always get `$RequireOrgKeys` injected, empty when not requested, so a leftover session variable can never turn the check on. The check exists only in packages built after it was added (2026-10): an older packaged Git-Runner given the switch swallows it into `$ScriptParams`, the Base64 payload wins, and it installs exactly as before without the check.
 
+Where the decision is made (for maintainers): printers in `New-PDPrinterIntuneMetadata` (`Other_Tools\Printer-Intune_Helpers.ps1`), shared by the one-printer wizard and bulk create; apps in `WindowsApp--InTune-Setup` just before the command is generated, through `Get-PDAppOrgKeysDecision` and `Get-PDAppPrereqCatalogInfo` (Setup.ps1). Those read two globals that `SearchJSONForApp` sets when it resolves the chosen app: `$Global:PDAppCatalogSource` (`Public` / `Private`) and `$Global:PDAppPrereqCatalogInfo` (where each prerequisite resolves, public first, like the installer). Both are on the wizard's stale-field clean-up list, so one selection can never leak into the next. The command itself is built in `New-IntuneGitRunnerCommand` (`Generate_Install-Command.ps1`), which validates the value and appends the switch and `; exit $LASTEXITCODE`.
+
 ```mermaid
 flowchart LR
     A[Intune / any RMM] -- "install command:<br/>run Git-Runner" --> B[Endpoint<br/>SYSTEM context]
@@ -426,6 +428,8 @@ School district content filters commonly block several of these for machine (non
 | Guided portal walkthrough by default; Graph publishing opt-in and admin-workstation-only | Guided mode needs no tenant credential. Automatic mode trades one well-scoped, short-lived, workstation-bound credential for removing manual transcription under Multi-Admin Approval; endpoints are identical in both modes |
 | Four deploy modes with separate ProgramData directories | Test and production coexist safely on the same machine |
 | One catalog drives tech-local installs, Intune installs, and the setup wizards | Single source of truth; no drift between what techs and Intune can deploy |
+| Installs that need the org registry values wait for them (Git-Runner exits 1618 = Intune Retry) instead of relying on install order | No Intune feature guarantees the values are written first: ESP does not track scripts, and one shared dependency for every app exceeds the dependency-graph limit |
+| `-RequireOrgKeys` takes `'Printers'` / `'Applications'`, not a boolean | The two areas need different values (each its own SAS key and JSON path). A boolean would either wait for every value - so a printer-only or app-only organization would wait forever for values it never sets - or make Git-Runner guess the area from the script path. Setup already knows what it is packaging, so it names the set |
 
 ---
 
