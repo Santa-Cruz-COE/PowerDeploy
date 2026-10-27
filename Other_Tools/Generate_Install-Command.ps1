@@ -119,6 +119,7 @@ function New-IntuneGitRunnerCommand {
         [string]$TargetWorkingDirectory,
         [string]$ScriptPath,
         [hashtable]$ScriptParams,
+        [string]$RequireOrgKeys='', # '' (no check), 'Printers' or 'Applications'. Install commands only.
         [string]$CustomNameModifier
     )
 
@@ -130,7 +131,14 @@ function New-IntuneGitRunnerCommand {
     Write-Log "ScriptPath: $ScriptPath"
     Write-Log "ScriptParams: $ScriptParams"
     Write-Log "CustomNameModifier: $CustomNameModifier"
+    Write-Log "RequireOrgKeys: $RequireOrgKeys"
     Write-Log ""
+
+    # Only '' (no check), 'Printers' or 'Applications'. A typo must never silently turn the endpoint check off.
+    if ($RequireOrgKeys -and ($RequireOrgKeys -cnotin @('Printers', 'Applications'))) {
+        Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END | Invalid RequireOrgKeys value: '$RequireOrgKeys'. Allowed: 'Printers', 'Applications', or empty." "ERROR"
+        Exit 1
+    }
 
     Write-Log "Function parameters received:"
     Write-Log ""
@@ -153,6 +161,19 @@ function New-IntuneGitRunnerCommand {
 %SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& '.\Git-Runner_TEMPLATE.ps1' -RepoNickName '$RepoNickName' -RepoUrl '$RepoUrl' -WorkingDirectory '$TargetWorkingDirectory' -ScriptPath '$ScriptPath'"
 "@
     }
+
+    # Org registry values pre-check: added inside the -Command string, before its closing quote.
+    # Empty = the command above is left exactly as built.
+    # "; exit $LASTEXITCODE" is required: under powershell.exe -Command, Windows PowerShell 5.1 turns a
+    # script's "Exit 1618" into process exit code 1 (tested), and Intune would read that as Failed instead
+    # of Retry. Passing $LASTEXITCODE back out keeps 1618, 0 and 1 exactly; an uncaught error still gives 1.
+    if ($RequireOrgKeys) {
+        if (-not $command.EndsWith('"')) {
+            Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END | Unexpected command shape; cannot add -RequireOrgKeys." "ERROR"
+            Exit 1
+        }
+        $command = $command.Substring(0, $command.Length - 1) + " -RequireOrgKeys '$RequireOrgKeys'" + '; exit $LASTEXITCODE' + '"'
+    }
         Write-Log ""
 
 
@@ -164,10 +185,10 @@ function New-IntuneGitRunnerCommand {
 
     # Create the custom script with the current params
     if($CustomNameModifier){
-        $global:CustomScript = & $CustomGitRunnerMakerScript -RepoNickName $RepoNickName -RepoUrl $RepoUrl -RepoBranch $RepoBranch -WorkingDirectory $TargetWorkingDirectory -ScriptPath $ScriptPath -ScriptParamsBase64 $paramsBase64 -CustomNameModifier $CustomNameModifier
+        $global:CustomScript = & $CustomGitRunnerMakerScript -RepoNickName $RepoNickName -RepoUrl $RepoUrl -RepoBranch $RepoBranch -WorkingDirectory $TargetWorkingDirectory -ScriptPath $ScriptPath -ScriptParamsBase64 $paramsBase64 -CustomNameModifier $CustomNameModifier -RequireOrgKeys $RequireOrgKeys
     }
     else {
-        $global:CustomScript = & $CustomGitRunnerMakerScript -RepoNickName $RepoNickName -RepoUrl $RepoUrl -RepoBranch $RepoBranch -WorkingDirectory $TargetWorkingDirectory -ScriptPath $ScriptPath -ScriptParamsBase64 $paramsBase64
+        $global:CustomScript = & $CustomGitRunnerMakerScript -RepoNickName $RepoNickName -RepoUrl $RepoUrl -RepoBranch $RepoBranch -WorkingDirectory $TargetWorkingDirectory -ScriptPath $ScriptPath -ScriptParamsBase64 $paramsBase64 -RequireOrgKeys $RequireOrgKeys
     }   
     Write-Log ""
 
@@ -235,10 +256,14 @@ Write-Log ""
 
 
 
-############################################################
-### Example: Create Detect/Remediation Script for InTune ###
-############################################################
-Function RegRemediationScript {
+#####################################################################
+### Organization registry values (shared by Intune and local setup) ###
+#####################################################################
+# The one place the org registry layout and its defaults are defined on the writer side.
+# Returns the bracketed RegistryChanges string that General_RemediationScript-Registry_TEMPLATE.ps1
+# parses. RegRemediationScript wraps it for Intune; Setup.ps1's OrganizationRegistryEntries--Local-Setup
+# passes it straight to the remediation template to write this PC's registry.
+Function OrgRegistryChangesString {
 
     Param(
 
@@ -270,12 +295,8 @@ Function RegRemediationScript {
     Write-Log "CustomRepoURL:              $CustomRepoURL"
     Write-Log "CustomRepoToken:            $CustomRepoToken"
     # End display of parameters
-    Write-Log ""   
-    Write-Log "Generating Detect/Remediation scripts for Registry changes..." -ForegroundColor Yellow
+    Write-Log ""
     # Choose the registry changes.
-
-        # Declare as list to bypass the Git Runner's function of putting passed string params into double quotes. This breaks the pass to the remediation script.
-        $RegistryChanges = @()
 
         # declare as string that will be parsed later
         [string]$RegistryChangesSTRING = ""
@@ -355,6 +376,43 @@ Function RegRemediationScript {
 
 
         # Make as many as you need
+
+    Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END"
+    Write-Log ""
+
+    return $RegistryChangesSTRING
+}
+
+############################################################
+### Example: Create Detect/Remediation Script for InTune ###
+############################################################
+Function RegRemediationScript {
+
+    # Same parameters as OrgRegistryChangesString; the defaults live there only, so anything not
+    # supplied here falls through to them.
+    Param(
+
+        $StorageAccountName,
+
+        $PrinterDataJSONpath,
+        $PrinterContainerSASkey,
+
+        $ApplicationDataJSONpath,
+        $ApplicationContainerSASkey,
+
+        $CustomRepoURL,
+        $CustomRepoToken
+
+    )
+
+    Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START" -ForegroundColor Yellow
+    Write-Log ""
+    Write-Log "Generating Detect/Remediation scripts for Registry changes..." -ForegroundColor Yellow
+
+        # Declare as list to bypass the Git Runner's function of putting passed string params into double quotes. This breaks the pass to the remediation script.
+        $RegistryChanges = @()
+
+        [string]$RegistryChangesSTRING = OrgRegistryChangesString @PSBoundParameters
 
         # Create a passable object
         $RegistryChangesSTRING = ''''+$RegistryChangesSTRING+''''
@@ -496,6 +554,7 @@ function InstallPrinterByIP {
     Param(
 
         [hashtable]$FunctionParams, # NOTE: This works for my intended use case but this with the param received snippet below are NOT done according to intent...
+        [string]$RequireOrgKeys='', # Passed to the INSTALL command only; the detect command never gets it.
         [String]$PrinterName="zz" # Didn't want to set to $false or $null for eval purposes. If printername is contained inside functionparams this gets overwritten. If I set default as $True, $False, or $Null it will be difficult to evaluate that no printername was passed either way, hence I made it "zz" as a dummy value.
 
     )
@@ -555,6 +614,7 @@ function InstallPrinterByIP {
         -TargetWorkingDirectory "$TargetWorkingDirectory" `
         -ScriptPath "Installers\General_IP-Printer_Installer.ps1" `
         -CustomNameModifier "$CustomNameModifier" `
+        -RequireOrgKeys "$RequireOrgKeys" `
         -ScriptParams @{
             PrinterName = "$PrinterName"
             WorkingDirectory = "$TargetWorkingDirectory"
@@ -760,6 +820,7 @@ function InstallAppWithJSON {
     Param(
 
         [String]$ApplicationName="zz", # I don't remember why I had to do this...
+        [string]$RequireOrgKeys='', # Passed to the INSTALL command only; the detect command never gets it.
         $DetectMethod,
         $DisplayName,
         $AppID
@@ -808,6 +869,7 @@ function InstallAppWithJSON {
     Write-Log "DetectMethod specified as: $DetectMethod"
     Write-Log "DisplayName specified as: $DisplayName"
     Write-Log "AppID specified as: $AppID"
+    Write-Log "RequireOrgKeys specified as: $RequireOrgKeys"
 
 
     If ($ApplicationName -eq "zz"){
@@ -827,6 +889,7 @@ function InstallAppWithJSON {
         -TargetWorkingDirectory "$TargetWorkingDirectory" `
         -ScriptPath "Installers\General_JSON-App_Installer.ps1" `
         -CustomNameModifier "$CustomNameModifier" `
+        -RequireOrgKeys "$RequireOrgKeys" `
         -ScriptParams @{
             TargetAppName = "$ApplicationName"
             WorkingDirectory = "$TargetWorkingDirectory"

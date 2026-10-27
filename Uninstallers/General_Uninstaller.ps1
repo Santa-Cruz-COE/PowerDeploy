@@ -2115,7 +2115,7 @@ if($WinGetID -ne $null -and $WinGetID -ne ""){
 
 } else {
 
-    Write-Log "WinGetID not provided.Using supplied AppName parameter for uninstall method for WinGet if requested."
+    Write-Log "WinGetID not provided. Using supplied AppName parameter for uninstall method for WinGet if requested."
 }
 
 if($UninstallString_DisplayName -ne $null -and $UninstallString_DisplayName -ne ""){
