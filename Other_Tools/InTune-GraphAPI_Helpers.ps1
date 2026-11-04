@@ -56,7 +56,12 @@ if (-not $script:PDGraph) {
         GraphHost           = 'graph.microsoft.com'
 
         # --- Required application roles (spec 7.1) ---
-        RequiredAppRoles  = @('DeviceManagementApps.ReadWrite.All', 'Group.Read.All')
+        # One list for every feature, by decision: a registration set up before a role was added
+        # here stops uploading with a "missing permission" error until Setup/Config (Automatic) is
+        # run again, which grants only the missing ones. DeviceManagementScripts.ReadWrite.All is
+        # Graph's least-privileged role for creating and assigning Intune platform scripts
+        # (deviceManagementScripts) and remediations (deviceHealthScripts).
+        RequiredAppRoles  = @('DeviceManagementApps.ReadWrite.All', 'DeviceManagementScripts.ReadWrite.All', 'Group.Read.All')
 
         # Intune's built-in assignment targets, typed as commands so they can never collide with
         # a real group's display name. The key is the lower-cased command; Id is what flows through
@@ -108,8 +113,14 @@ if (-not $script:PDGraph) {
         CredentialSubPath         = 'PowerDeploy\GraphUpload'
         CredentialFileName        = 'credential.clixml'
         CredentialSchema          = 1
-        NearExpiryWarningDays     = 30
-        DefaultSecretLifetimeDays = 180
+        # The secret can change Intune apps AND scripts that run as SYSTEM fleet-wide, with no
+        # second-admin approval once it is excluded from MAA, so it lasts 24 hours by default: a
+        # copied secret stops working the next day. The warning therefore fires on most runs, by
+        # design. Separately, Setup offers to replace a secret that has RenewOfferHours or less
+        # left right before an upload starts (Get-PDGraphSecretRenewalNeed decides).
+        NearExpiryWarningHours    = 24
+        RenewOfferHours           = 2
+        DefaultSecretLifetimeDays = 1
 
         # --- Locking (spec 7.3: serialize concurrent credential changes) ---
         LockWaitSeconds  = 10
@@ -125,6 +136,9 @@ if (-not $script:PDGraph) {
         # The "small Intune read" of the connection test (spec 7.2). Deliberately the same
         # collection the uploader works on, because that is the permission being tested.
         ConnectionTestPath     = '/beta/deviceAppManagement/mobileApps?$top=1&$select=id,displayName'
+        # The second, separate read: Intune platform scripts, the collection the scripts upload
+        # works on. Reported on its own so one failing read never hides the other's result.
+        ScriptsConnectionTestPath = '/beta/deviceManagement/deviceManagementScripts?$top=1&$select=id,displayName'
         SecretLabelDateFormat  = 'yyyy-MM-dd'
         SecretEndDateFormat    = 'yyyy-MM-ddTHH:mm:ssZ'
         # Entra itself refuses what the tenant will not allow; these bounds exist to stop an
@@ -741,8 +755,15 @@ function ConvertFrom-PDGraphCredentialFile {
         return $null
     }
 
-    $daysUntilExpiry = $null
-    if ($null -ne $expires) { $daysUntilExpiry = [math]::Ceiling(($expires - [System.DateTimeOffset]::UtcNow).TotalDays) }
+    # Days are kept for display and older callers; the warning and the renewal offer use the exact
+    # hours, because with a 24-hour secret "1 day" covers everything from 1 to 24 hours.
+    $daysUntilExpiry  = $null
+    $hoursUntilExpiry = $null
+    if ($null -ne $expires) {
+        $left             = $expires - [System.DateTimeOffset]::UtcNow
+        $daysUntilExpiry  = [math]::Ceiling($left.TotalDays)
+        $hoursUntilExpiry = $left.TotalHours
+    }
 
     return @{
         SchemaVersion      = [int]$schema
@@ -755,6 +776,7 @@ function ConvertFrom-PDGraphCredentialFile {
         ServicePrincipalId = (Get-PDGraphTrimmedText ([string](& $get 'ServicePrincipalId')))
         AppDisplayName     = (Get-PDGraphTrimmedText ([string](& $get 'AppDisplayName')))
         DaysUntilExpiry    = $daysUntilExpiry
+        HoursUntilExpiry   = $hoursUntilExpiry
         Warnings           = @()
     }
 }
@@ -827,12 +849,120 @@ function Exit-PDGraphCredentialLock {
     }
 }
 
+function ConvertTo-PDGraphExpiryTime {
+    <#
+        .SYNOPSIS
+        An expiry as a DateTimeOffset, from any shape it is held in; $null when there is none.
+
+        .DESCRIPTION
+        The loader hands back a DateTimeOffset, while New-PDGraphCredentialObject holds the
+        ISO-8601 string that goes to disk. Comparing or formatting the string as if it were a time
+        gives nonsense (a string comparison) or an error (String has no ToString(format, culture)),
+        so every expiry message goes through this first.
+    #>
+    param( [AllowNull()][object]$Value )
+
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [System.DateTimeOffset]) { return [System.DateTimeOffset]$Value }
+    if ($Value -is [DateTime]) { return [System.DateTimeOffset]::new(([DateTime]$Value).ToUniversalTime()) }
+
+    $text = ([string]$Value).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+
+    $dot = [System.DateTimeOffset]::MinValue
+    if ([System.DateTimeOffset]::TryParse($text, [System.Globalization.DateTimeFormatInfo]::InvariantInfo, [System.Globalization.DateTimeStyles]::None, [ref]$dot)) {
+        return $dot
+    }
+    $plain = [DateTime]::MinValue
+    if ([DateTime]::TryParse($text, [ref]$plain)) {
+        return [System.DateTimeOffset]::new($plain.ToUniversalTime())
+    }
+    return $null
+}
+
+function Format-PDGraphExpiry {
+    <#
+        .SYNOPSIS
+        An expiry for an operator to read: date AND time, in this PC's local time, labelled.
+        With a 24-hour secret the date alone does not say whether it is still valid.
+    #>
+    param( [AllowNull()][object]$ExpiresOn )
+
+    $expires = ConvertTo-PDGraphExpiryTime -Value $ExpiresOn
+    if ($null -eq $expires) { return 'an unknown time' }
+
+    return ('{0} local time' -f $expires.ToLocalTime().ToString('yyyy-MM-dd HH:mm', [System.Globalization.CultureInfo]::InvariantCulture))
+}
+
+function Format-PDGraphTimeRemaining {
+    <#
+        .SYNOPSIS
+        How long until an expiry, for an operator to read: hours and minutes under 2 days, whole
+        days beyond that. Rounded down, so it never promises more time than is left.
+    #>
+    param(
+        [AllowNull()][object]$ExpiresOn,
+        [AllowNull()][object]$Now
+    )
+
+    $expires = ConvertTo-PDGraphExpiryTime -Value $ExpiresOn
+    if ($null -eq $expires) { return 'an unknown time' }
+
+    $at = ConvertTo-PDGraphExpiryTime -Value $Now
+    if ($null -eq $at) { $at = [System.DateTimeOffset]::UtcNow }
+
+    $left = $expires - $at
+    if ($left.TotalSeconds -le 0) { return 'no time (it has expired)' }
+
+    if ($left.TotalHours -lt 48) {
+        $hours   = [int][math]::Floor($left.TotalHours)
+        $minutes = [int]$left.Minutes
+        if ($hours -eq 0) { return ('{0} minute(s)' -f [math]::Max(1, $minutes)) }
+        return ('{0} hour(s) {1} minute(s)' -f $hours, $minutes)
+    }
+
+    return ('{0} day(s)' -f [int][math]::Floor($left.TotalDays))
+}
+
+function Get-PDGraphSecretRenewalNeed {
+    <#
+        .SYNOPSIS
+        Whether to offer a new secret before an upload starts. Pure: no file, no network, no prompt.
+
+        .DESCRIPTION
+        Answers one of:
+          NotStored - there is no expiry to judge (nothing stored); the caller's usual check reports it
+          Expired   - the expiry has passed
+          Soon      - RenewOfferHours or less are left, so a long upload could outlive the secret
+          Ok        - more than that is left
+        The offer is separate from the NearExpiryWarningHours warning, which only informs.
+    #>
+    param(
+        [AllowNull()][object]$ExpiresOn,
+        [AllowNull()][object]$Now,
+        [double]$RenewOfferHours = -1
+    )
+
+    $expires = ConvertTo-PDGraphExpiryTime -Value $ExpiresOn
+    if ($null -eq $expires) { return 'NotStored' }
+
+    $at = ConvertTo-PDGraphExpiryTime -Value $Now
+    if ($null -eq $at) { $at = [System.DateTimeOffset]::UtcNow }
+
+    $window = $RenewOfferHours
+    if ($window -lt 0) { $window = [double]$script:PDGraph.RenewOfferHours }
+
+    if ($expires -le $at) { return 'Expired' }
+    if (($expires - $at).TotalHours -le $window) { return 'Soon' }
+    return 'Ok'
+}
+
 function Get-PDGraphCredential {
     <#
         .SYNOPSIS
         Loads, validates, and returns the local upload credential.
         .DESCRIPTION
-        Refuses expired credentials, warns within NearExpiryWarningDays (as a returned
+        Refuses expired credentials, warns within NearExpiryWarningHours (as a returned
         Warnings entry, so the caller decides how to display it), and turns an unreadable,
         corrupt, foreign-account, or wrong-schema file into one clear operator message.
         The plaintext secret is never produced here.
@@ -865,13 +995,16 @@ function Get-PDGraphCredential {
 
     $warnings = @()
 
-    if ($credential.SecretExpiresOn -le [System.DateTimeOffset]::UtcNow) {
-        $shown = $credential.SecretExpiresOn.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)
-        Stop-PDGraphError -Message "The stored application secret expired on $shown. Rotate it with InTuneAPI--Setup-and-Manage." -Stage 'Credential'
+    $now = [System.DateTimeOffset]::UtcNow
+
+    if ($credential.SecretExpiresOn -le $now) {
+        $shown = Format-PDGraphExpiry -ExpiresOn $credential.SecretExpiresOn
+        Stop-PDGraphError -Message "The stored application secret expired at $shown. Rotate it with InTuneAPI--Setup-and-Manage." -Stage 'Credential'
     }
 
-    if ($credential.DaysUntilExpiry -le [int]$script:PDGraph.NearExpiryWarningDays) {
-        $warnings += ("The stored application secret expires in {0} day(s) ({1}). Plan a rotation." -f $credential.DaysUntilExpiry, $credential.SecretExpiresOn.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture))
+    # Exact time left, not whole days: the default secret only lives 24 hours.
+    if (($credential.SecretExpiresOn - $now).TotalHours -le [double]$script:PDGraph.NearExpiryWarningHours) {
+        $warnings += ("The stored application secret expires in {0} (at {1}). Plan a rotation." -f (Format-PDGraphTimeRemaining -ExpiresOn $credential.SecretExpiresOn -Now $now), (Format-PDGraphExpiry -ExpiresOn $credential.SecretExpiresOn))
     }
 
     if ([string]::IsNullOrWhiteSpace($credential.SecretKeyId)) {
@@ -3846,7 +3979,7 @@ function Compare-PDIntuneAssignmentSet {
 #
 # Provisioning and rotation cannot run as the upload identity: spec 7.1 forbids the application
 # that publishes apps from holding any application-management permission. The writes that create
-# the registration, grant its two roles and add or remove its secrets are therefore made by a
+# the registration, grant its roles ($PDGraph.RequiredAppRoles) and add or remove its secrets are therefore made by a
 # temporary, interactive, administrator-authenticated session (Microsoft.Graph.Authentication,
 # -ContextScope Process), which is a second identity and a second network boundary:
 #
@@ -4834,7 +4967,7 @@ function Set-PDEntraRequiredResourceAccess {
     }
 
     if (@($added).Count -eq 0) {
-        return @{ Changed = $false; Added = @(); Message = 'Both roles are already in the application requested permissions.' }
+        return @{ Changed = $false; Added = @(); Message = 'All required roles are already in the application requested permissions.' }
     }
 
     if ($DryRun) {
@@ -5099,14 +5232,12 @@ function Add-PDAppSecret {
                   Message = 'The secret request answered without a secret value, so nothing was saved.' }
     }
 
+    # Not through [string]: PowerShell 7's ConvertFrom-Json hands back a UTC DateTime here, whose
+    # string form drops the UTC marker and would be re-read as local time (hours off - which
+    # matters with a 24-hour secret). 5.1 hands back the ISO string; both are handled.
     $expiresOn = $expires
-    $endRead   = [string](Get-PDGraphPropertyValue -Object $created -Name 'endDateTime')
-    if (-not [string]::IsNullOrWhiteSpace($endRead)) {
-        $parsedEnd = [System.DateTimeOffset]::UtcNow
-        if ([System.DateTimeOffset]::TryParse($endRead, [System.Globalization.DateTimeFormatInfo]::InvariantInfo, [System.Globalization.DateTimeStyles]::None, [ref]$parsedEnd)) {
-            $expiresOn = $parsedEnd
-        }
-    }
+    $parsedEnd = ConvertTo-PDGraphExpiryTime -Value (Get-PDGraphPropertyValue -Object $created -Name 'endDateTime')
+    if ($null -ne $parsedEnd) { $expiresOn = $parsedEnd }
 
     $secure = $null
     try {
@@ -5127,7 +5258,7 @@ function Add-PDAppSecret {
         LifetimeDays = $days
         Label        = $label
         Warnings     = $warnings
-        Message      = ("Created a secret (key id {0}) that expires {1}." -f (Get-PDGraphTrimmedText -Value $keyId), $expiresOn.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture))
+        Message      = ("Created a secret (key id {0}) that expires {1}." -f (Get-PDGraphTrimmedText -Value $keyId), (Format-PDGraphExpiry -ExpiresOn $expiresOn))
     }
 }
 
@@ -5668,6 +5799,7 @@ function Get-PDGraphCredentialSummary {
         SecretKeyId       = [string]$credential.SecretKeyId
         SecretExpiresOn   = $credential.SecretExpiresOn
         DaysUntilExpiry   = $credential.DaysUntilExpiry
+        HoursUntilExpiry  = $credential.HoursUntilExpiry
         Warnings          = @($credential.Warnings)
         Message           = 'A usable credential is stored for this Windows account.'
     }
@@ -5789,7 +5921,7 @@ function Start-PDGraphSecretRotation {
 
     $expired = ($old.SecretExpiresOn -le [System.DateTimeOffset]::UtcNow)
     if ($expired) {
-        $answer.Warnings += ("The stored secret expired on {0}; rotation can still replace it." -f $old.SecretExpiresOn.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture))
+        $answer.Warnings += ("The stored secret expired at {0}; rotation can still replace it." -f (Format-PDGraphExpiry -ExpiresOn $old.SecretExpiresOn))
     }
 
     $sessionTenant = [string](Get-PDGraphPropertyValue -Object $Session -Name 'TenantId')
@@ -5900,14 +6032,14 @@ function Start-PDGraphSecretRotation {
     if ($SkipOldKeyRevocation) {
         $answer.Reason = 'RotatedOldKeyKept'
         $answer.Warnings += 'You asked to keep the old secret, so it is still active and will need revoking in Entra when you are sure this workstation is using the new one.'
-        $answer.Message = ("Rotation finished. The new secret (key id {0}) is saved and works; the old secret {1} was left active as requested." -f [string]$created.KeyId, $(if ([string]::IsNullOrWhiteSpace($old.SecretKeyId)) { '(no key id recorded)' } else { ([guid]$old.SecretKeyId).ToString() }))
+        $answer.Message = ("Rotation finished. The new secret (key id {0}) is saved and works, expiring {2}; the old secret {1} was left active as requested." -f [string]$created.KeyId, $(if ([string]::IsNullOrWhiteSpace($old.SecretKeyId)) { '(no key id recorded)' } else { ([guid]$old.SecretKeyId).ToString() }), (Format-PDGraphExpiry -ExpiresOn $created.ExpiresOn))
         return $answer
     }
 
     $revoked = Remove-PDAppSecret -ApplicationId $applicationId -KeyId $old.SecretKeyId -Description 'previous secret' -Stage $Stage
     if ($revoked.Success) {
         $answer.OldKeyRemoved = $true
-        $answer.Message = ("Rotation finished. The new secret (key id {0}) works and is saved, expiring {1}; the old secret {2} was revoked." -f [string]$created.KeyId, $created.ExpiresOn.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture), ([guid]$old.SecretKeyId).ToString())
+        $answer.Message = ("Rotation finished. The new secret (key id {0}) works and is saved, expiring {1}; the old secret {2} was revoked." -f [string]$created.KeyId, (Format-PDGraphExpiry -ExpiresOn $created.ExpiresOn), ([guid]$old.SecretKeyId).ToString())
         return $answer
     }
 
@@ -5915,7 +6047,7 @@ function Start-PDGraphSecretRotation {
     $answer.Reason          = 'RotatedOldKeyActive'
     $answer.LeftoverKeyId   = $revoked.KeyId
     $answer.Warnings       += [string]$revoked.Message
-    $answer.Message = ("Rotation finished: this workstation now uses the new secret (key id {0}), which was saved and tested. {1}" -f [string]$created.KeyId, [string]$revoked.Message)
+    $answer.Message = ("Rotation finished: this workstation now uses the new secret (key id {0}), which was saved and tested and expires {2}. {1}" -f [string]$created.KeyId, [string]$revoked.Message, (Format-PDGraphExpiry -ExpiresOn $created.ExpiresOn))
     return $answer
 }
 
@@ -6160,7 +6292,7 @@ function Start-PDGraphUploadProvisioning {
 
     $answer.ServicePrincipalId = [string]$principal.ServicePrincipalId
 
-    # --- 4. the two Graph roles, by exact id ----------------------------------------------
+    # --- 4. the required Graph roles ($PDGraph.RequiredAppRoles), by exact id --------------
     $graph = Get-PDGraphServicePrincipal -AppId ([string]$script:PDGraph.GraphServiceAppId) -WithAppRoles -Stage $Stage
     & $addStep 'GraphServicePrincipal' $graph.Found $graph.Message
     if (-not $graph.Found) {
@@ -6243,13 +6375,13 @@ function Start-PDGraphUploadProvisioning {
         return (& $answerOnly 'SaveFailed' ("The secret works but could not be stored: {0} Its key id is {1}; revoke it in Entra if this workstation should not keep using it." -f [string]$info.Message, [string]$created.KeyId) $false)
     }
 
-    & $addStep 'Save' $true ("Stored at {0}, expiring {1}." -f [string]$saved.Path, $saved.SecretExpiresOn.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture))
+    $expiryText = Format-PDGraphExpiry -ExpiresOn $saved.SecretExpiresOn
 
-    $expiryText = $saved.SecretExpiresOn.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)
+    & $addStep 'Save' $true ("Stored at {0}, expiring {1}." -f [string]$saved.Path, $expiryText)
 
     # The ids are already in the step lines above; the summary only says what the operator needs.
     # (Setup prints the Multi-Admin Approval next step itself, so it is not repeated here.)
-    $answer.Message = ("'{0}' is ready. This PC's secret is saved and expires {1}. If your tenant has Multi-Admin Approval enabled, set up its exclusion next (MAA Exclusions - Setup/Config)." -f [string]$script:PDGraph.AppDisplayName, $expiryText)
+    $answer.Message = ("'{0}' is ready. This PC's secret is saved and expires {1}. If your tenant has Multi-Admin Approval enabled, set up its exclusions (Apps and Scripts policies) next (MAA Exclusions - Setup/Config)." -f [string]$script:PDGraph.AppDisplayName, $expiryText)
 
     return (& $answerOnly 'Provisioned' $answer.Message $true)
 }
@@ -6294,10 +6426,14 @@ function Test-PDGraphUploadCandidateCredential {
 
     $warnings = @()
 
-    if ($credential.SecretExpiresOn -le [System.DateTimeOffset]::UtcNow) {
-        $shown = $credential.SecretExpiresOn.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)
+    # New-PDGraphCredentialObject holds the expiry as the ISO string that goes to disk; compare it
+    # as a time, not as text.
+    $expiresAt = ConvertTo-PDGraphExpiryTime -Value $credential.SecretExpiresOn
+
+    if ($expiresAt -le [System.DateTimeOffset]::UtcNow) {
+        $shown = Format-PDGraphExpiry -ExpiresOn $expiresAt
         return @{ Valid = $false; Reason = 'Expired'; Credential = $credential; Roles = @(); MissingRoles = @(); Warnings = $warnings
-                  Message = ("That secret expired on {0}, so it was not saved. Enter the current secret or create a new one in Entra." -f $shown) }
+                  Message = ("That secret expired at {0}, so it was not saved. Enter the current secret or create a new one in Entra." -f $shown) }
     }
 
     if ([string]::IsNullOrWhiteSpace([string]$credential.SecretKeyId)) {
@@ -6337,23 +6473,26 @@ function Test-PDGraphUploadCandidateCredential {
     }
 
     return @{ Valid = $true; Reason = 'Valid'; Credential = $credential; Roles = @($held); MissingRoles = @(); Warnings = $warnings
-              Message = ("Those credentials work: the token carries {0} application role(s) and expires {1}." -f @($held).Count, $credential.SecretExpiresOn.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)) }
+              Message = ("Those credentials work: the token carries {0} application role(s) and the secret expires {1}." -f @($held).Count, (Format-PDGraphExpiry -ExpiresOn $expiresAt)) }
 }
 
 function Test-PDGraphUploadConnection {
     <#
         .SYNOPSIS
-        The menu's 'Test the saved connection': token, roles, and one small Intune read
-        (spec 7.2).
+        The menu's 'Test the saved connection': token, roles, and two small read-only Intune
+        reads - apps and scripts - reported separately (spec 7.2).
 
         .DESCRIPTION
         Deliberately modest, and says so: a successful read does not prove the application is
         excluded from Multi-Admin Approval, because MAA blocks writes and this performs none. The
         token is requested with -Force so a revoked secret cannot hide behind this process's cache.
+        AppsRead and ScriptsRead each say Requested / Success / Message; both reads run even when
+        the first fails.
     #>
     param(
         [AllowNull()][string]$CredentialPath,
         [AllowNull()][string]$ReadPath,
+        [AllowNull()][string]$ScriptsReadPath,
         [switch]$SkipIntuneRead,
         [string]$Stage = 'Credential'
     )
@@ -6395,37 +6534,78 @@ function Test-PDGraphUploadConnection {
                   Warnings = $warnings }
     }
 
-    $read = $null
-    if (-not $SkipIntuneRead) {
-        $path = Get-PDGraphTrimmedText -Value $ReadPath
-        if ([string]::IsNullOrWhiteSpace($path)) { $path = [string]$script:PDGraph.ConnectionTestPath }
-
+    # Two separate reads, apps then scripts, each with its own result: the second always runs, so
+    # a scripts failure (say, a permission not yet propagated) never hides whether apps work.
+    $readOne = {
+        param($Path, $What)
         try {
-            $read = Invoke-PDGraphRequest -Method Get -Uri $path -AuthContext @{ Credential = $credential } -RetryMode 'Read' -Stage $Stage -Description 'connection test read'
+            $payload = Invoke-PDGraphRequest -Method Get -Uri $Path -AuthContext @{ Credential = $credential } -RetryMode 'Read' -Stage $Stage -Description ("connection test read ({0})" -f $What)
+            return @{ Requested = $true; Success = $true; Payload = $payload; Message = ("The small Intune {0} read succeeded." -f $What) }
         } catch {
             $info = Get-PDGraphErrorInfo -ErrorRecord $_
-            return @{ Success = $false; Reason = 'ReadFailed'; Message = $info.Message; Roles = @($held); MissingRoles = @()
-                      SecretExpiresOn = $credential.SecretExpiresOn; DaysUntilExpiry = $credential.DaysUntilExpiry
-                      Warnings = $warnings }
+            return @{ Requested = $true; Success = $false; Payload = $null; Message = [string]$info.Message }
         }
     }
 
-    $warnings += 'This test only reads, so it cannot tell whether the Multi-Admin Approval (MAA) exclusion is in place. Your first automatic upload will.'
+    $notRequested = @{ Requested = $false; Success = $false; Payload = $null; Message = 'Not requested.' }
+    $appsRead     = $notRequested
+    $scriptsRead  = $notRequested
+
+    if (-not $SkipIntuneRead) {
+        $appsPath = Get-PDGraphTrimmedText -Value $ReadPath
+        if ([string]::IsNullOrWhiteSpace($appsPath)) { $appsPath = [string]$script:PDGraph.ConnectionTestPath }
+
+        $scriptsPath = Get-PDGraphTrimmedText -Value $ScriptsReadPath
+        if ([string]::IsNullOrWhiteSpace($scriptsPath)) { $scriptsPath = [string]$script:PDGraph.ScriptsConnectionTestPath }
+
+        $appsRead    = & $readOne $appsPath 'apps'
+        $scriptsRead = & $readOne $scriptsPath 'scripts'
+    }
+
+    $expiryText = Format-PDGraphExpiry -ExpiresOn $credential.SecretExpiresOn
+
+    # The per-read answers carry no payload: the menu only needs OK/failed and the reason.
+    $appsSummary    = @{ Requested = $appsRead.Requested;    Success = $appsRead.Success;    Message = $appsRead.Message }
+    $scriptsSummary = @{ Requested = $scriptsRead.Requested; Success = $scriptsRead.Success; Message = $scriptsRead.Message }
+
+    if (-not $SkipIntuneRead -and (-not $appsRead.Success -or -not $scriptsRead.Success)) {
+        $failed = @()
+        if (-not $appsRead.Success)    { $failed += ("the Intune apps read failed: {0}" -f $appsRead.Message) }
+        if (-not $scriptsRead.Success) { $failed += ("the Intune scripts read failed: {0}" -f $scriptsRead.Message) }
+        $passed = @()
+        if ($appsRead.Success)    { $passed += 'the Intune apps read succeeded' }
+        if ($scriptsRead.Success) { $passed += 'the Intune scripts read succeeded' }
+
+        $message = ("The token and its application roles are fine, but {0}" -f ($failed -join '; '))
+        if (@($passed).Count -gt 0) { $message = ("{0} ({1})." -f $message, ($passed -join '; ')) }
+
+        return @{ Success = $false; Reason = 'ReadFailed'; Message = $message; Roles = @($held); MissingRoles = @()
+                  TokenExpiresOn = $token.ExpiresOn
+                  IntuneRead = $appsRead.Payload; AppsRead = $appsSummary; ScriptsRead = $scriptsSummary
+                  SecretExpiresOn = $credential.SecretExpiresOn; DaysUntilExpiry = $credential.DaysUntilExpiry
+                  HoursUntilExpiry = $credential.HoursUntilExpiry
+                  Warnings = $warnings }
+    }
+
+    $warnings += 'This test only reads, so it cannot tell whether the Multi-Admin Approval (MAA) exclusions are in place. Your first automatic upload will.'
 
     $readNote = 'no Intune read was requested'
-    if (-not $SkipIntuneRead) { $readNote = 'the small Intune read succeeded' }
+    if (-not $SkipIntuneRead) { $readNote = 'the small Intune apps and scripts reads succeeded' }
 
     return @{
-        Success         = $true
-        Reason          = 'Connected'
-        Message         = ("The stored credential works: token issued, both application roles present, {0}. The secret expires {1}." -f $readNote, $credential.SecretExpiresOn.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture))
-        Roles           = @($held)
-        MissingRoles    = @()
-        TokenExpiresOn  = $token.ExpiresOn
-        IntuneRead      = $read
-        SecretExpiresOn = $credential.SecretExpiresOn
-        DaysUntilExpiry = $credential.DaysUntilExpiry
-        Warnings        = $warnings
+        Success          = $true
+        Reason           = 'Connected'
+        Message          = ("The stored credential works: token issued, all {0} application roles present, {1}. The secret expires {2}." -f @($script:PDGraph.RequiredAppRoles).Count, $readNote, $expiryText)
+        Roles            = @($held)
+        MissingRoles     = @()
+        TokenExpiresOn   = $token.ExpiresOn
+        IntuneRead       = $appsRead.Payload
+        AppsRead         = $appsSummary
+        ScriptsRead      = $scriptsSummary
+        SecretExpiresOn  = $credential.SecretExpiresOn
+        DaysUntilExpiry  = $credential.DaysUntilExpiry
+        HoursUntilExpiry = $credential.HoursUntilExpiry
+        Warnings         = $warnings
     }
 }
 
@@ -6460,20 +6640,30 @@ function Get-PDGraphUploadMaaGuidance {
     if ([string]::IsNullOrWhiteSpace($name)) { $name = [string]$script:PDGraph.AppDisplayName }
     if ([string]::IsNullOrWhiteSpace($id))   { $id   = 'not configured on this workstation yet' }
 
+    # Two access policies, two exclusions: MAA protects apps and scripts with separate policies
+    # (by profile type), and excluding the registration from one does nothing for the other.
     $steps = @(
-        'Intune -> Tenant administration -> Multi Admin Approval -> Access policies',
+        'Intune admin center -> Tenant administration -> Multi Admin Approval -> Access policies',
         '-> Apps policy -> Exclusions -> Add enterprise applications',
         ('-> select {0} (Intune lists app registrations here as enterprise applications) -> submit a justification' -f $name),
+        '-> another authorized administrator approves',
+        '-> requester selects Complete',
+        'Then the same again for scripts, separately from the Apps policy:',
+        'Intune admin center -> Tenant administration -> Multi Admin Approval -> Access policies',
+        '-> the access policy for the Scripts profile type -> Exclusions -> Add enterprise applications',
+        ('-> select {0} -> submit a justification' -f $name),
         '-> another authorized administrator approves',
         '-> requester selects Complete'
     )
 
     $notes = @(
-        'Why: with Multi-Admin Approval on, every change to Intune apps waits for a second admin to approve it. The exclusion lets uploads made by the PowerDeploy Azure App Registration go through without that wait.',
+        'Why: with Multi-Admin Approval on, every change to Intune apps or scripts waits for a second admin to approve it. The exclusions let uploads made by the PowerDeploy Azure App Registration go through without that wait.',
+        'Apps and scripts are protected by separate access policies, so the registration needs an exclusion in each: the Apps policy for app uploads, and the Scripts policy for Intune platform scripts and remediations. Each exclusion change needs approval by a second admin.',
+        'Not yet confirmed: whether the Scripts policy also covers remediations. This will be tested against a live tenant.',
         'It only covers the app-registration (application-only) uploads PowerDeploy makes. Changes you make yourself in the Intune portal still need approval as before.',
-        'You only do this once. Rotating this PC''s secret does not undo it, because the exclusion belongs to the app registration, not the secret.',
+        'You only do this once per policy. Rotating this PC''s secret does not undo it, because the exclusion belongs to the app registration, not the secret.',
         'Without the exclusion, Intune refuses automatic uploads. The wizard tells you that and switches to the guided manual setup.',
-        '"Test config" cannot tell whether the exclusion is in place (it only reads). Your first automatic upload will.'
+        '"Test config" cannot tell whether the exclusions are in place (it only reads). Your first automatic upload will.'
     )
 
     return @{
@@ -6481,6 +6671,6 @@ function Get-PDGraphUploadMaaGuidance {
         ClientId       = $id
         Steps          = @($steps)
         Notes          = @($notes)
-        Message        = ('Add "{0}" to the exclusions of your Multi-Admin Approval apps policy.' -f $name)
+        Message        = ('Add "{0}" to the exclusions of your Multi-Admin Approval Apps policy and, separately, your Scripts policy.' -f $name)
     }
 }

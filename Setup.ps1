@@ -1088,6 +1088,14 @@ Function Test-PrinterBulkReady {
         return $false
     }
 
+    # An expired or nearly expired secret gets an offer to renew it before the run starts; declined
+    # or failed renewal means the tool cannot run, as with no usable credential.
+    if (-not (Confirm-GraphUploadSecretFresh)) {
+        Write-Log ""
+        Write-Log "The bulk printer tools need a usable upload credential. It is set up and rotated from the main menu with InTuneAPI--Setup-and-Manage." 'WARNING'
+        return $false
+    }
+
     try {
         $Credential = Get-PDGraphCredential
         foreach ($Warning in @($Credential.Warnings)) {
@@ -5201,14 +5209,16 @@ Function Read-GraphUploadTenantId {
 
 Function Read-GraphUploadSecretLifetime {
 
-    param([int]$Default = 180)
+    param([int]$Default = 1)
 
-    # Spec 7.2 step 7: six months by default, but a different lifetime consistent with tenant
-    # policy is accepted. The service still decides what the tenant really allows.
+    # Spec 7.2 step 7: 1 day (24 hours) by default ($PDGraph.DefaultSecretLifetimeDays), because the
+    # secret can change Intune apps and scripts fleet-wide; a different lifetime consistent with
+    # tenant policy is accepted. The service still decides what the tenant really allows.
     While ($true) {
 
         Write-Log "How many days should this PC's secret last before it has to be rotated?" 'WARNING'
-        Write-Log "     Press Enter for $Default days (about six months)." 'INFO2'
+        Write-Log "     Press Enter for $Default day(s) ($($Default * 24) hours). A short lifetime limits how long a copied secret could be used;" 'INFO2'
+        Write-Log "     uploads offer to sign in and create a new one when it has expired or is about to." 'INFO2'
 
         $Answer = ([string](Read-Host "Days")).Trim()
 
@@ -5321,7 +5331,7 @@ Function Connect-GraphUploadAdminSession {
     Write-Log "About the permissions requested:"
     Write-Log "  - Read and write applications: finds or creates the PowerDeploy Azure App Registration and adds or removes its secrets."
     if ($IncludeConsent) {
-        Write-Log "  - Manage app permission grants and app role assignments: gives that application its two permissions (manage Intune apps, read groups)."
+        Write-Log "  - Manage app permission grants and app role assignments: gives that application its three permissions (manage Intune apps; manage Intune scripts - platform scripts and remediations; read groups)."
     }
     Write-Log "  - View users' basic profile: tells Setup which account signed in, so it can check you are in the right tenant."
     Write-Log "  - Maintain access to data you have given it access to: lets the sign-in renew itself so you are not asked again every hour."
@@ -5395,7 +5405,7 @@ Function Show-GraphUploadCredentialState {
     Write-Log ("     Client ID:   {0}" -f [string]$summary.ClientId) 'INFO2'
 
     if ($summary.Usable) {
-        Write-Log ("     Secret expires: {0} ({1} day(s))" -f $summary.SecretExpiresOn.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture), $summary.DaysUntilExpiry) 'INFO2'
+        Write-Log ("     Secret expires: {0} ({1} left)" -f (Format-PDGraphExpiry -ExpiresOn $summary.SecretExpiresOn), (Format-PDGraphTimeRemaining -ExpiresOn $summary.SecretExpiresOn)) 'INFO2'
         Write-Log ("     Secret key id:  {0}" -f $(if ([string]::IsNullOrWhiteSpace($summary.SecretKeyId)) { 'not recorded (rotation will report the old key for manual cleanup)' } else { [string]$summary.SecretKeyId })) 'INFO2'
     } else {
         Write-Log "     The file exists but is not usable: $($summary.Message)" 'ERROR'
@@ -5484,8 +5494,8 @@ Function Invoke-GraphUploadProvisionApplication {
         } else {
             Write-Log "     1 - Create an Azure App Registration named '$AppName' (none exists yet)"
         }
-        Write-Log "     2 - Make sure it has its two permissions: manage Intune apps, and read groups"
-        Write-Log "     3 - Create a secret for this PC (valid $LifetimeDays days), test it, and save it encrypted for your Windows account"
+        Write-Log "     2 - Make sure it has its three permissions: manage Intune apps; manage Intune scripts (platform scripts and remediations); read groups"
+        Write-Log "     3 - Create a secret for this PC (valid $LifetimeDays day(s)), test it, and save it encrypted for your Windows account"
         Write-Log ""
 
         if (-not (Read-GraphUploadYesNo -Question "Go ahead?" -Default $true)) {
@@ -5587,12 +5597,15 @@ Function Invoke-GraphUploadEnterCredential {
         return
     }
 
+    # The default is only a guess at what was created in Entra (now + the default lifetime); the
+    # Expires value Entra shows for the secret is the right answer. Uploads stop at the time
+    # entered here, so an earlier time than the real one only means renewing sooner.
     $DefaultExpiry = [System.DateTimeOffset]::UtcNow.AddDays([double]$PDGraph.DefaultSecretLifetimeDays)
-    $DefaultText   = $DefaultExpiry.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)
+    $DefaultText   = Format-PDGraphExpiry -ExpiresOn $DefaultExpiry
 
     While ($true) {
 
-        Write-Log "When does this secret expire? Enter a date, or press Enter for $DefaultText (today + $([int]$PDGraph.DefaultSecretLifetimeDays) days)." 'WARNING'
+        Write-Log "When does this secret expire (the Expires value Entra shows for it)? Enter a date and time in this PC's local time, or press Enter for $DefaultText (now + $([int]$PDGraph.DefaultSecretLifetimeDays) day(s))." 'WARNING'
         $Answer = ([string](Read-Host "Secret expiry")).Trim()
 
         if ([string]::IsNullOrWhiteSpace($Answer)) { $ExpiresOn = $DefaultExpiry; break }
@@ -5603,7 +5616,7 @@ Function Invoke-GraphUploadEnterCredential {
             break
         }
 
-        Write-Log "That date could not be read. Try a date like 2026-04-09." 'ERROR'
+        Write-Log "That date could not be read. Try a date and time like 2026-04-09 14:30, or a date like 2026-04-09." 'ERROR'
 
     }
 
@@ -5652,7 +5665,7 @@ Function Invoke-GraphUploadEnterCredential {
 
         Write-Log ""
         Write-Log "Saved for this Windows account: $($Saved.Path)" 'SUCCESS'
-        Write-Log "     Expires: $($Saved.SecretExpiresOn.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture))" 'INFO2'
+        Write-Log "     Expires: $(Format-PDGraphExpiry -ExpiresOn $Saved.SecretExpiresOn)" 'INFO2'
         Write-Log "     Azure App Registration - Test config re-tests this at any time; Rotate local PC secret replaces it." 'WARNING'
 
     } Catch {
@@ -5665,8 +5678,9 @@ Function Invoke-GraphUploadEnterCredential {
 
 Function Invoke-GraphUploadTestConnection {
 
-    # Spec 7.2 "Test": token, the two roles, one small Intune read. It reports permissions and expiry,
-    # and says plainly that a read cannot prove the Multi-Admin Approval exclusion exists.
+    # Spec 7.2 "Test": token, the required roles, and two small Intune reads (apps, then scripts),
+    # each reported on its own line. It reports permissions and expiry, and says plainly that a read
+    # cannot prove the Multi-Admin Approval exclusions exist.
 
     Write-Log ""
     Write-Log "-------------------------------------------------------------------------------------------"
@@ -5686,6 +5700,18 @@ Function Invoke-GraphUploadTestConnection {
 
         if ($null -ne $Result.TokenExpiresOn) {
             Write-Log "     Token expires: $($Result.TokenExpiresOn)" 'INFO2'
+        }
+
+        # One line per read, so a failing scripts read never hides how the apps read went.
+        foreach ($Read in @(@{ Label = 'Intune apps read';    Answer = $Result.AppsRead },
+                            @{ Label = 'Intune scripts read'; Answer = $Result.ScriptsRead })) {
+            if ($null -eq $Read.Answer -or -not $Read.Answer.Requested) {
+                Write-Log ("     {0}: not run (the token or roles check above did not pass)" -f $Read.Label) 'INFO2'
+            } elseif ($Read.Answer.Success) {
+                Write-Log ("     {0}: OK" -f $Read.Label) 'SUCCESS'
+            } else {
+                Write-Log ("     {0}: failed - {1}" -f $Read.Label, [string]$Read.Answer.Message) 'ERROR'
+            }
         }
 
         Write-Log ""
@@ -5715,6 +5741,12 @@ Function Invoke-GraphUploadRotateSecret {
     # only then revoke the OLD secret by its recorded key id. If the test or the save fails the old
     # credential is still in place; if only the revocation fails, the new secret stays working and the
     # surviving old key is reported. Nothing is ever revoked by display name.
+    #
+    # -LifetimeDays skips the lifetime question (Confirm-GraphUploadSecretFresh renews with the
+    # default lifetime right before an upload). Returns $true only when the new secret was saved and
+    # works; the menu discards the answer.
+
+    param([int]$LifetimeDays = 0)
 
     Write-Log ""
     Write-Log "-------------------------------------------------------------------------------------------"
@@ -5722,19 +5754,26 @@ Function Invoke-GraphUploadRotateSecret {
     Write-Log "-------------------------------------------------------------------------------------------"
     Write-Log ""
 
-    if (-not (Confirm-GraphUploadAdminModule -Purpose "rotating this PC's secret")) { return }
+    if (-not (Confirm-GraphUploadAdminModule -Purpose "rotating this PC's secret")) { return $false }
 
     $Summary = Show-GraphUploadCredentialState
 
     if (-not $Summary.Stored) {
         Write-Log "There is nothing to rotate yet. Use Azure App Registration - Setup/Config first." 'WARNING'
-        return
+        return $false
     }
 
-    $LifetimeDays = Read-GraphUploadSecretLifetime -Default ([int]$PDGraph.DefaultSecretLifetimeDays)
+    if ($LifetimeDays -le 0) {
+        $LifetimeDays = Read-GraphUploadSecretLifetime -Default ([int]$PDGraph.DefaultSecretLifetimeDays)
+    } else {
+        Write-Log ""
+        Write-Log "The new secret will last $LifetimeDays day(s) ($($LifetimeDays * 24) hours)." 'INFO2'
+    }
 
     $Session = Connect-GraphUploadAdminSession -Purpose 'add a new secret for this PC and remove the old one'
-    if ($null -eq $Session) { return }
+    if ($null -eq $Session) { return $false }
+
+    $Rotated = $false
 
     try {
 
@@ -5747,6 +5786,7 @@ Function Invoke-GraphUploadRotateSecret {
 
         if ($Result.Success) {
             Write-Log $Result.Message 'SUCCESS'
+            $Rotated = $true
         } else {
             Write-Log $Result.Message 'ERROR'
             Write-Log "Your previous credential is still in place, so uploads keep working as they did before." 'WARNING'
@@ -5759,6 +5799,7 @@ Function Invoke-GraphUploadRotateSecret {
     } Catch {
 
         Show-GraphUploadError $_
+        $Rotated = $false
 
     } Finally {
 
@@ -5766,6 +5807,63 @@ Function Invoke-GraphUploadRotateSecret {
         Write-Log "     $($Closed.Message)" 'INFO2'
 
     }
+
+    return $Rotated
+
+}
+
+Function Confirm-GraphUploadSecretFresh {
+
+    # Called right before an API upload starts (Invoke-InTuneAutoUpload; Test-PrinterBulkReady for
+    # the bulk tools). With the 24-hour default the stored secret is often expired or about to run
+    # out, so rather than let the upload fail on it - or stop part way through a long run - this
+    # offers to sign in and replace it now, with the default lifetime and no lifetime question.
+    #
+    # Returns $true when the caller should carry on exactly as before: the secret has more than
+    # RenewOfferHours left, it was just renewed, or there is nothing usable to judge (no file, or a
+    # file the caller's own credential check will report). Returns $false when renewal was needed
+    # but declined or did not succeed; the caller then takes its "no usable credential" path.
+    # The expiry is read without the expiry rule (Get-PDGraphCredential refuses an expired secret,
+    # which is exactly the case to handle here); the secret itself is never read or shown.
+
+    $Stored = $null
+    try {
+        if (-not [System.IO.File]::Exists((Get-PDGraphCredentialPath))) { return $true }
+        $Stored = Get-PDGraphCredentialMetadata
+    } Catch {
+        return $true
+    }
+
+    $Need = Get-PDGraphSecretRenewalNeed -ExpiresOn $Stored.SecretExpiresOn
+    if ($Need -ne 'Expired' -and $Need -ne 'Soon') { return $true }
+
+    $LifetimeDays = [int]$PDGraph.DefaultSecretLifetimeDays
+    $Expiry       = Format-PDGraphExpiry -ExpiresOn $Stored.SecretExpiresOn
+
+    Write-Log ""
+    if ($Need -eq 'Expired') {
+        Write-Log "This PC's Intune upload secret expired at $Expiry, so API uploads cannot use it." 'WARNING'
+    } else {
+        Write-Log ("This PC's Intune upload secret runs out in {0} (at {1}), which may be before this upload finishes." -f (Format-PDGraphTimeRemaining -ExpiresOn $Stored.SecretExpiresOn), $Expiry) 'WARNING'
+    }
+
+    $Renew = Read-GraphUploadYesNo -Question ("Sign in now and create a new {0}-hour client secret?" -f ($LifetimeDays * 24)) -Default $true `
+                -Note "An administrator sign-in adds the new secret, tests it, saves it for your Windows account, and then removes the old one."
+
+    if (-not $Renew) {
+        Write-Log "No new secret was created." 'WARNING'
+        return $false
+    }
+
+    if (Invoke-GraphUploadRotateSecret -LifetimeDays $LifetimeDays) {
+        Write-Log ""
+        Write-Log "Continuing with the new secret." 'SUCCESS'
+        Write-Log ""
+        return $true
+    }
+
+    Write-Log "A new secret was not saved." 'WARNING'
+    return $false
 
 }
 
@@ -6308,7 +6406,7 @@ Function Show-IntuneUploadReview {
     }
 
     if ($null -ne $Review.SecretExpiresOn) {
-        Write-Log ("Upload credential expires: {0}" -f ([System.DateTimeOffset]$Review.SecretExpiresOn).ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)) 'INFO2'
+        Write-Log ("Upload credential expires: {0} ({1} left)" -f (Format-PDGraphExpiry -ExpiresOn $Review.SecretExpiresOn), (Format-PDGraphTimeRemaining -ExpiresOn $Review.SecretExpiresOn)) 'INFO2'
     }
 
     foreach ($Warning in @($Review.Warnings)) {
@@ -6340,6 +6438,16 @@ Function Invoke-InTuneAutoUpload {
 
         if (-not $GraphUploadAvailable) {
             Write-Log "Automatic setup is not available on this workstation: $GraphUploadLoadError" 'WARNING'
+            Write-Log "Continuing with the guided manual setup." 'WARNING'
+            Pause
+            return $false
+        }
+
+        # Before step 5: an expired or nearly expired secret gets an offer to renew it first. Declined
+        # or failed renewal is the same as having no usable credential.
+        if (-not (Confirm-GraphUploadSecretFresh)) {
+            Write-Log ""
+            Write-Log "The upload credential is set up from the main menu with InTuneAPI--Setup-and-Manage." 'WARNING'
             Write-Log "Continuing with the guided manual setup." 'WARNING'
             Pause
             return $false
@@ -6622,7 +6730,7 @@ Function InTuneAPI--Setup-and-Manage {
         } elseif ($Choice -eq '2') {
             Invoke-GraphUploadTestConnection
         } elseif ($Choice -eq '3') {
-            Invoke-GraphUploadRotateSecret
+            $null = Invoke-GraphUploadRotateSecret
         } elseif ($Choice -eq '4') {
             Invoke-GraphUploadRemoveCredential
         } elseif ($Choice -eq '5') {

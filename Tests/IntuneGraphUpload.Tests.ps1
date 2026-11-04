@@ -132,7 +132,7 @@ function New-MockResponse {
 }
 
 function New-TestJwt {
-    param([string[]]$Roles = @('DeviceManagementApps.ReadWrite.All', 'Group.Read.All'))
+    param([string[]]$Roles = @('DeviceManagementApps.ReadWrite.All', 'DeviceManagementScripts.ReadWrite.All', 'Group.Read.All'))
 
     $roleList = (@($Roles | ForEach-Object { '"' + $_ + '"' }) -join ',')
     $payload  = '{"aud":"00000003-0000-0000-c000-000000000000","roles":[' + $roleList + ']}'
@@ -219,7 +219,8 @@ Add-TestCase 'M2-01b' 'Every documented entry point is defined after import' {
                             'Get-PDGraphProvisioningPrerequisite', 'Connect-PDGraphInteractive',
                             'Disconnect-PDGraphInteractive', 'Start-PDGraphUploadProvisioning',
                             'Start-PDGraphSecretRotation', 'Remove-PDGraphUploadCredential',
-                            'Get-PDGraphUploadMaaGuidance',
+                            'Get-PDGraphUploadMaaGuidance', 'Get-PDGraphSecretRenewalNeed',
+                            'Format-PDGraphExpiry', 'Format-PDGraphTimeRemaining', 'ConvertTo-PDGraphExpiryTime',
                             'Find-PDEntraUploadApp', 'Ensure-PDEntraApplication',
                             'Ensure-PDServicePrincipal', 'Ensure-PDAppRoleAssignments',
                             'Add-PDAppSecret', 'Remove-PDAppSecret', 'Get-PDEntraAppSecretKey',
@@ -484,14 +485,89 @@ Add-TestCase 'C01d' 'Expired credentials are refused outright' {
 Add-TestCase 'C02' 'Near-expiry credentials stay usable but return a warning' {
     $path = Join-Path $tempRoot 'nearexpiry\credential.clixml'
     $c = New-PDGraphCredentialObject -TenantId ([guid]::NewGuid().ToString()) -ClientId ([guid]::NewGuid().ToString()) `
-        -ClientSecret (New-FakeSecureString) -SecretExpiresOn ([System.DateTimeOffset]::UtcNow.AddDays(12))
+        -ClientSecret (New-FakeSecureString) -SecretExpiresOn ([System.DateTimeOffset]::UtcNow.AddHours(12))
     Save-PDGraphCredential -Credential $c -Path $path | Out-Null
 
     $loaded = Get-PDGraphCredential -Path $path
-    Assert-True ($loaded.DaysUntilExpiry -le 13 -and $loaded.DaysUntilExpiry -ge 11) "days until expiry is near ($($loaded.DaysUntilExpiry))"
+    Assert-True ($loaded.HoursUntilExpiry -le 12 -and $loaded.HoursUntilExpiry -gt 11) "hours until expiry is exact, not whole days ($($loaded.HoursUntilExpiry))"
     Assert-Equal 1 @($loaded.Warnings | Where-Object { $_ -like '*expire*' }).Count 'exactly one expiry warning'
     Assert-Equal 1 @($loaded.Warnings | Where-Object { $_ -like '*key id*' }).Count 'the missing key id is separately reported'
     Assert-Like '*expire*' @($loaded.Warnings | Where-Object { $_ -like '*expire*' })[0] 'warning is about expiry'
+}
+
+Add-TestCase 'C02b' 'The expiry warning fires at 24 hours or less left, and not at 25' {
+    Assert-Equal 24 ([double]$script:PDGraph.NearExpiryWarningHours) 'the shipped warning threshold is 24 hours'
+    Assert-True (-not $script:PDGraph.ContainsKey('NearExpiryWarningDays')) 'the day-based threshold is gone'
+
+    $make = {
+        param($Name, $Hours)
+        $path = Join-Path $tempRoot ("warnwindow\{0}\credential.clixml" -f $Name)
+        $c = New-PDGraphCredentialObject -TenantId ([guid]::NewGuid().ToString()) -ClientId ([guid]::NewGuid().ToString()) `
+            -ClientSecret (New-FakeSecureString) -SecretExpiresOn ([System.DateTimeOffset]::UtcNow.AddHours($Hours)) `
+            -SecretKeyId ([guid]::NewGuid().ToString())
+        Save-PDGraphCredential -Credential $c -Path $path | Out-Null
+        return (Get-PDGraphCredential -Path $path)
+    }
+
+    # Saved at exactly 24 hours, it is just under 24 hours by the time it is read: inside the window.
+    $at24 = & $make 'h24' 24
+    Assert-Equal 1 @($at24.Warnings | Where-Object { $_ -like '*expires in*' }).Count 'warns with 24 hours left'
+    Assert-Match '\d{4}-\d{2}-\d{2} \d{2}:\d{2} local time' (@($at24.Warnings) -join ' | ') 'the warning shows the expiry date AND time, labelled local'
+    Assert-Match 'expires in 2[0-3] hour\(s\)' (@($at24.Warnings) -join ' | ') 'time left is in hours under two days'
+
+    $at25 = & $make 'h25' 25
+    Assert-Equal 0 @($at25.Warnings).Count 'no warning with 25 hours left'
+
+    $atWeek = & $make 'week' (24 * 7)
+    Assert-Equal 0 @($atWeek.Warnings).Count 'no warning a week out (the old 30-day window is gone)'
+}
+
+Add-TestCase 'C02c' 'Renewal need: expired, soon and ok split at the 2-hour boundary' {
+    Assert-Equal 2 ([double]$script:PDGraph.RenewOfferHours) 'the shipped renewal-offer window is 2 hours'
+    Assert-Equal 1 ([int]$script:PDGraph.DefaultSecretLifetimeDays) 'the default secret lifetime is 1 day'
+
+    $now = [System.DateTimeOffset]::new(2026, 11, 3, 12, 0, 0, [TimeSpan]::Zero)
+
+    Assert-Equal 'NotStored' (Get-PDGraphSecretRenewalNeed -ExpiresOn $null -Now $now) 'no expiry to judge'
+    Assert-Equal 'Expired' (Get-PDGraphSecretRenewalNeed -ExpiresOn $now.AddMinutes(-1) -Now $now) 'a minute ago'
+    Assert-Equal 'Expired' (Get-PDGraphSecretRenewalNeed -ExpiresOn $now -Now $now) 'exactly now counts as expired'
+    Assert-Equal 'Soon' (Get-PDGraphSecretRenewalNeed -ExpiresOn $now.AddMinutes(1) -Now $now) 'one minute left'
+    Assert-Equal 'Soon' (Get-PDGraphSecretRenewalNeed -ExpiresOn $now.AddHours(2) -Now $now) 'exactly 2 hours left is inside the offer window'
+    Assert-Equal 'Ok' (Get-PDGraphSecretRenewalNeed -ExpiresOn $now.AddHours(2).AddSeconds(1) -Now $now) 'just over 2 hours left'
+    Assert-Equal 'Ok' (Get-PDGraphSecretRenewalNeed -ExpiresOn $now.AddHours(23) -Now $now) 'a fresh 24-hour secret'
+
+    # The on-disk ISO string and a DateTime are judged the same as a DateTimeOffset.
+    Assert-Equal 'Soon' (Get-PDGraphSecretRenewalNeed -ExpiresOn ($now.AddHours(1).ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)) -Now $now) 'ISO string expiry'
+    Assert-Equal 'Expired' (Get-PDGraphSecretRenewalNeed -ExpiresOn $now.AddHours(-3).UtcDateTime -Now $now) 'DateTime expiry'
+
+    # An explicit window overrides the setting.
+    Assert-Equal 'Soon' (Get-PDGraphSecretRenewalNeed -ExpiresOn $now.AddHours(5) -Now $now -RenewOfferHours 6) 'custom window'
+}
+
+Add-TestCase 'C02d' 'Expiry messages show the date and the local time, and time left in hours under two days' {
+    $when = [System.DateTimeOffset]::new(2026, 11, 3, 18, 45, 0, [TimeSpan]::Zero)
+    $text = Format-PDGraphExpiry -ExpiresOn $when
+    Assert-Equal ('{0} local time' -f $when.ToLocalTime().ToString('yyyy-MM-dd HH:mm', [System.Globalization.CultureInfo]::InvariantCulture)) $text 'date and time, converted to local and labelled'
+    Assert-Equal $text (Format-PDGraphExpiry -ExpiresOn ($when.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture))) 'the on-disk string formats the same'
+    Assert-Equal 'an unknown time' (Format-PDGraphExpiry -ExpiresOn $null) 'no expiry is said plainly'
+
+    $now = $when.AddHours(-30).AddMinutes(-5)
+    Assert-Equal '30 hour(s) 5 minute(s)' (Format-PDGraphTimeRemaining -ExpiresOn $when -Now $now) 'hours under two days'
+    Assert-Equal '45 minute(s)' (Format-PDGraphTimeRemaining -ExpiresOn $when -Now $when.AddMinutes(-45)) 'minutes under an hour'
+    Assert-Equal '3 day(s)' (Format-PDGraphTimeRemaining -ExpiresOn $when -Now $when.AddDays(-3).AddHours(-5)) 'whole days beyond two days, rounded down'
+    Assert-Like '*expired*' (Format-PDGraphTimeRemaining -ExpiresOn $when -Now $when.AddSeconds(1)) 'after expiry'
+
+    # The expired refusal names the time, not just the date.
+    $path = Join-Path $tempRoot 'expiredtime\credential.clixml'
+    $c = New-PDGraphCredentialObject -TenantId ([guid]::NewGuid().ToString()) -ClientId ([guid]::NewGuid().ToString()) `
+        -ClientSecret (New-FakeSecureString) -SecretExpiresOn ([System.DateTimeOffset]::UtcNow.AddHours(-2))
+    Save-PDGraphCredential -Credential $c -Path $path | Out-Null
+    $caught = Assert-Throws -Body { Get-PDGraphCredential -Path $path } -MessagePattern '*expired*'
+    Assert-Match 'expired at \d{4}-\d{2}-\d{2} \d{2}:\d{2} local time' $caught.Exception.Message 'the refusal shows date and time'
+
+    # The read that does not apply the expiry rule still reports the expiry, for the renewal offer.
+    $metadata = Get-PDGraphCredentialMetadata -Path $path
+    Assert-Equal 'Expired' (Get-PDGraphSecretRenewalNeed -ExpiresOn $metadata.SecretExpiresOn) 'an expired file is judged Expired, not NotStored'
 }
 
 Add-TestCase 'C03a' 'A save that fails validation leaves the previous credential working' {
@@ -629,7 +705,7 @@ Add-TestCase 'M2-10' 'Token acquisition decodes roles, caches, and honours -Forc
     Assert-True ($script:MockCalls[0].BodyText -like 'grant_type=client_credentials*') 'client credentials grant'
     Assert-True ($script:MockCalls[0].BodyText -like '*scope=https%3A%2F%2Fgraph.microsoft.com%2F.default*') 'scope url-encoded'
     Assert-True (-not $script:MockCalls[0].ContainsKey('Headers') -or $null -eq $script:MockCalls[0].Headers -or -not $script:MockCalls[0].Headers.ContainsKey('Authorization')) 'no authorization header on a token request'
-    Assert-Equal 2 @($token.Roles).Count 'roles decoded from the token'
+    Assert-Equal 3 @($token.Roles).Count 'roles decoded from the token'
     Assert-True ($token.ExpiresOn -gt [DateTime]::UtcNow.AddMinutes(50)) 'expiry computed'
     Assert-NotLike '*token-flow-secret*' ($script:MockCalls[0].Uri) 'secret never appears in the token URL'
 
@@ -1408,7 +1484,7 @@ function New-PDM3InputSet {
         [string]$InstallText = '"Setup.exe" /quiet ',
         [string]$UninstallText = '"Setup.exe" /uninstall /quiet',
         [byte[]]$DetectionBytes = $null,
-        [int]$DaysUntilExpiry = 90,
+        [double]$DaysUntilExpiry = 90,
         [string]$FakeSecret = 'm3-never-real-secret'
     )
 
@@ -2141,10 +2217,11 @@ Add-TestCase 'M3-04' 'A missing or expired credential fails before any Graph cal
     Assert-Equal 'Credential' $result.Stage 'credential stage'
     Assert-Like '*expired*' $result.Message 'names the reason'
 
-    # Near expiry stays usable but warns (C02 applied to the whole flow).
+    # Near expiry stays usable but warns (C02 applied to the whole flow): 12 hours is inside the
+    # 24-hour warning window.
     Clear-PDMockGraph
     Reset-PDM3Scenario
-    $near = New-PDM3InputSet -Case 'm3-nearexpiry' -DaysUntilExpiry 10
+    $near = New-PDM3InputSet -Case 'm3-nearexpiry' -DaysUntilExpiry 0.5
     $result = Invoke-PDIntuneUpload -IntuneWinPath (Get-PDM3FixturePath -Name 'valid.intunewin') `
         -DisplayName 'PowerDeploy Test App' -Description 'N/A' -Publisher 'PowerDeploy' `
         -InstallCommandFile $near.InstallFile -UninstallCommandFile $near.UninstallFile `
@@ -3678,7 +3755,7 @@ function Reset-PDM5Scenario {
         [object[]]$Failures = @(),
         [object]$Context = $null,
         [object]$ContextAfterConnect = $null,
-        [string[]]$TokenRoles = @('DeviceManagementApps.ReadWrite.All', 'Group.Read.All'),
+        [string[]]$TokenRoles = @('DeviceManagementApps.ReadWrite.All', 'DeviceManagementScripts.ReadWrite.All', 'Group.Read.All'),
         [int]$TokenRoleEmptyResponses = 0,
         [string]$TokenFailure = $null
     )
@@ -3925,13 +4002,17 @@ function Set-PDM5AppOnlyTransport {
         the administrator channel because they are different identities (spec 7.1).
     #>
     param(
-        [string[]]$Roles = @('DeviceManagementApps.ReadWrite.All', 'Group.Read.All'),
+        [string[]]$Roles = @('DeviceManagementApps.ReadWrite.All', 'DeviceManagementScripts.ReadWrite.All', 'Group.Read.All'),
         [int]$EmptyRoleResponses = 0,
-        [string]$Failure = $null
+        [string]$Failure = $null,
+        [int]$AppsReadStatus = 200,
+        [int]$ScriptsReadStatus = 200
     )
 
-    $script:M5.TokenRoles   = @($Roles)
-    $script:M5.TokenFailure = $Failure
+    $script:M5.TokenRoles        = @($Roles)
+    $script:M5.TokenFailure      = $Failure
+    $script:M5.AppsReadStatus    = $AppsReadStatus
+    $script:M5.ScriptsReadStatus = $ScriptsReadStatus
 
     $script:PDGraph.TestTransport = {
         param($Request)
@@ -3962,8 +4043,14 @@ function Set-PDM5AppOnlyTransport {
             } | ConvertTo-Json -Compress))
         }
 
-        if (([string]$Request.Uri) -like 'https://graph.microsoft.com/beta/deviceAppManagement/mobileApps*') {
-            return (New-PDMockJsonResponse -Json (New-PDMockValuePage -Value @(@{ id = 'read-back-app'; displayName = 'anything' })))
+        # A non-200 status (a permission refusal) is returned as Graph would; 403 is not retried.
+        foreach ($read in @(@{ Like = 'https://graph.microsoft.com/beta/deviceAppManagement/mobileApps*';             Status = [int]$state.AppsReadStatus;    Id = 'read-back-app' },
+                            @{ Like = 'https://graph.microsoft.com/beta/deviceManagement/deviceManagementScripts*'; Status = [int]$state.ScriptsReadStatus; Id = 'read-back-script' })) {
+            if (([string]$Request.Uri) -notlike $read.Like) { continue }
+            if ($read.Status -ne 0 -and $read.Status -ne 200) {
+                return (New-PDMockJsonResponse -Status $read.Status -Json (@{ error = @{ code = 'Forbidden'; message = 'Application is not authorized to perform this operation.' } } | ConvertTo-Json -Compress))
+            }
+            return (New-PDMockJsonResponse -Json (New-PDMockValuePage -Value @(@{ id = $read.Id; displayName = 'anything' })))
         }
 
         throw ("the m5 app-only transport has no answer for {0} {1}" -f [string]$Request.Method, [string]$Request.Uri)
@@ -4032,6 +4119,7 @@ $script:M5GraphSpId    = '55555555-5555-5555-5555-555555555555'
 $script:M5GraphAppId   = '00000003-0000-0000-c000-000000000000'
 $script:M5RoleApps     = '66666666-6666-6666-6666-666666666666'
 $script:M5RoleGroups   = '77777777-7777-7777-7777-777777777777'
+$script:M5RoleScripts  = '12121212-1212-1212-1212-121212121212'
 $script:M5OldKeyId     = '88888888-8888-8888-8888-888888888888'
 $script:M5NewKeyId     = '99999999-9999-9999-9999-999999999999'
 
@@ -4039,8 +4127,9 @@ function New-PDM5GraphServicePrincipal {
     param([switch]$WithoutApplicationRoles, [string]$Id)
 
     $roles = @(
-        @{ id = $script:M5RoleApps;   value = 'DeviceManagementApps.ReadWrite.All'; allowedMemberTypes = @('Application') },
-        @{ id = $script:M5RoleGroups; value = 'Group.Read.All';                     allowedMemberTypes = @('Application') },
+        @{ id = $script:M5RoleApps;    value = 'DeviceManagementApps.ReadWrite.All';    allowedMemberTypes = @('Application') },
+        @{ id = $script:M5RoleScripts; value = 'DeviceManagementScripts.ReadWrite.All'; allowedMemberTypes = @('Application') },
+        @{ id = $script:M5RoleGroups;  value = 'Group.Read.All';                        allowedMemberTypes = @('Application') },
         @{ id = 'aaaaaaaa-0000-0000-0000-000000000001'; value = 'Group.Read.All';   allowedMemberTypes = @('Delegated') }
     )
     if ($WithoutApplicationRoles) {
@@ -4179,6 +4268,43 @@ Add-TestCase 'M5-02' 'the provisioning menu offers exactly the spec 7.2 options 
     Assert-True (@($names | Where-Object { $_ -like 'InTuneAPI--*' }).Count -eq 1) 'the provisioning menu is reflected exactly once'
 }
 
+Add-TestCase 'M5-02b' 'uploads offer a fresh 24-hour secret first, through one shared helper that never reads the secret' {
+    $ast   = Get-PDM5SetupAst
+    $names = @($ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) | ForEach-Object { $_.Name }
+
+    $helper = 'Confirm-GraphUploadSecretFresh'
+    Assert-True (@($names) -ccontains $helper) "Setup.ps1 should define $helper"
+    Assert-True ($helper -notlike '*--*') "$helper must not contain '--' (it would appear in the reflection menu)"
+
+    $fresh    = Get-PDM5SetupFunction -Name $helper
+    $calls    = @($fresh.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true)) | ForEach-Object { $_.GetCommandName() }
+    Assert-True (@($calls) -ccontains 'Get-PDGraphCredentialMetadata') 'it reads the expiry without the expiry rule'
+    Assert-True (@($calls) -notcontains 'Get-PDGraphCredential') 'and never through the loader that throws on an expired secret'
+    Assert-True (@($calls) -ccontains 'Get-PDGraphSecretRenewalNeed') 'the decision is the tested library function'
+    Assert-True (@($calls) -ccontains 'Invoke-GraphUploadRotateSecret') 'renewal is the existing rotation flow'
+    Assert-Like '*Sign in now and create a new*-hour client secret?*' ([string]$fresh.Extent.Text) 'the question asked before an upload'
+    Assert-Equal 0 @($fresh.FindAll({ param($node) $node -is [System.Management.Automation.Language.ExitStatementAst] }, $true)).Count "$helper must never call exit"
+
+    # The rotation can skip the lifetime question and reports whether it worked.
+    $rotate = Get-PDM5SetupFunction -Name 'Invoke-GraphUploadRotateSecret'
+    Assert-True (@($rotate.Body.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath }) -ccontains 'LifetimeDays') 'Invoke-GraphUploadRotateSecret takes -LifetimeDays'
+    Assert-Like '*$null = Invoke-GraphUploadRotateSecret*' ([string](Get-PDM5SetupFunction -Name 'InTuneAPI--Setup-and-Manage').Extent.Text) 'the menu discards the returned answer so it is not printed'
+
+    # Every API upload entry point offers it BEFORE its own credential check.
+    foreach ($caller in @('Invoke-InTuneAutoUpload', 'Test-PrinterBulkReady')) {
+        $text  = [string](Get-PDM5SetupFunction -Name $caller).Extent.Text
+        $offer = $text.IndexOf('Confirm-GraphUploadSecretFresh')
+        $check = $text.IndexOf('Get-PDGraphCredential')
+        Assert-True ($offer -ge 0) "$caller offers the renewal"
+        Assert-True ($check -gt $offer) "$caller offers it before checking the credential"
+    }
+
+    # The lifetime question no longer promises six months.
+    $lifetime = [string](Get-PDM5SetupFunction -Name 'Read-GraphUploadSecretLifetime').Extent.Text
+    Assert-NotLike '*six months*' $lifetime 'the default is no longer described as six months'
+    Assert-Like '*copied secret*' $lifetime 'and the short default is explained'
+}
+
 Add-TestCase 'M5-03' 'the provisioning menu calls the library and never the network itself' {
     $ast = Get-PDM5SetupAst
 
@@ -4186,7 +4312,7 @@ Add-TestCase 'M5-03' 'the provisioning menu calls the library and never the netw
     foreach ($helper in @('Invoke-GraphUploadProvisionApplication', 'Invoke-GraphUploadEnterCredential',
                           'Invoke-GraphUploadTestConnection', 'Invoke-GraphUploadRotateSecret',
                           'Show-GraphUploadMaaInstructions', 'Invoke-GraphUploadRemoveCredential',
-                          'Connect-GraphUploadAdminSession')) {
+                          'Connect-GraphUploadAdminSession', 'Confirm-GraphUploadSecretFresh')) {
         $fn = @($names | Where-Object { $_.Name -eq $helper })[0]
         Assert-True ($null -ne $fn) "expected $helper to be defined"
 
@@ -4432,7 +4558,7 @@ Add-TestCase 'M5-13' 'the secret test waits for propagation, and refuses fast wh
         New-PDM5StoredCredential -Path $path
 
         # Roles appear on the second attempt: that is propagation, and it must be waited for.
-        Reset-PDM5Scenario -TokenRoles @('DeviceManagementApps.ReadWrite.All', 'Group.Read.All') -TokenRoleEmptyResponses 1
+        Reset-PDM5Scenario -TokenRoles @('DeviceManagementApps.ReadWrite.All', 'DeviceManagementScripts.ReadWrite.All', 'Group.Read.All') -TokenRoleEmptyResponses 1
         Set-PDM5AppOnlyTransport -EmptyRoleResponses 1
 
         $candidate = Get-PDGraphCredential -Path $path
@@ -4573,6 +4699,45 @@ Add-TestCase 'C04b' 'when the old key cannot be revoked the new credential stays
     }
 }
 
+Add-TestCase 'C04d' 'an EXPIRED secret rotates to a 1-day one, the old key is revoked, and the messages show date and time' {
+    Invoke-PDM5Case -Body {
+        $path = Join-Path $tempRoot 'm5-rotate-expired\credential.clixml'
+        New-PDM5StoredCredential -Path $path -SecretKeyId $script:M5OldKeyId -AppObjectId $script:M5AppId -TenantId $script:M5TenantId -ClientId $script:M5ClientId -DaysFromNow (-0.25)
+
+        Assert-Throws -Body { Get-PDGraphCredential -Path $path } -MessagePattern '*expired*' 'the stored secret is expired for uploads' | Out-Null
+
+        Reset-PDM5Scenario -AppByObjectId @{ $script:M5AppId = @{ appId = $script:M5ClientId; displayName = 'PowerDeploy Intune Upload' } } `
+                           -Secret @{ keyId = $script:M5NewKeyId; secretText = 'renewed-secret-never-real'; endDateTime = ([System.DateTimeOffset]::UtcNow.AddDays(1)).ToString('yyyy-MM-ddTHH:mm:ssZ') }
+        Set-PDM5AppOnlyTransport
+
+        $result = Start-PDGraphSecretRotation -CredentialPath $path -Session (New-PDM5Session -TenantId $script:M5TenantId) -SecretLifetimeDays ([int]$script:PDGraph.DefaultSecretLifetimeDays)
+
+        Assert-True $result.Success ("an expired secret still rotates ({0}: {1})" -f [string]$result.Reason, [string]$result.Message)
+        Assert-Equal 'Rotated' $result.Reason 'and the old key was revoked'
+        Assert-Equal $script:M5OldKeyId ([string]@($script:M5.Revoked | ForEach-Object { if ([string]$_ -match '([0-9a-fA-F-]{36})') { $matches[1] } })[0]) 'the revoked key is the old one'
+        Assert-Match 'expiring \d{4}-\d{2}-\d{2} \d{2}:\d{2} local time' $result.Message 'the rotation message shows the new expiry with its time'
+        Assert-Match 'expired at \d{4}-\d{2}-\d{2} \d{2}:\d{2} local time' (@($result.Warnings) -join ' | ') 'and the expired warning shows the old one with its time'
+        Assert-NotLike '*renewed-secret-never-real*' ([string]($result | ConvertTo-Json -Depth 5 -Compress)) 'no secret value in the result'
+
+        # Read the raw text: ConvertFrom-Json on PowerShell 7 turns the ISO date into a DateTime whose
+        # string form loses the UTC marker.
+        $requested = @(@($script:M5.Bodies) | Where-Object { $_.Uri -like '*/addPassword' } | ForEach-Object { [regex]::Match([string]$_.Body, '"endDateTime"\s*:\s*"([^"]+)"').Groups[1].Value })
+        Assert-Equal 1 $requested.Count 'one secret was requested'
+        $asked = [System.DateTimeOffset]::Parse($requested[0], [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal)
+        $hours = ($asked - [System.DateTimeOffset]::UtcNow).TotalHours
+        Assert-True ($hours -gt 23 -and $hours -le 24) "the new secret was asked for with a 24-hour lifetime ($hours h)"
+
+        $stored = Get-PDGraphCredential -Path $path
+        Assert-Equal $script:M5NewKeyId ([string]$stored.SecretKeyId) 'the stored credential is the new one'
+        Assert-Equal 'Ok' (Get-PDGraphSecretRenewalNeed -ExpiresOn $stored.SecretExpiresOn) 'and needs no renewal offer'
+        # The service's endDateTime is stored as the same instant on both engines (PowerShell 7's
+        # ConvertFrom-Json turns it into a DateTime, which once was re-read as local time).
+        Assert-True ($stored.HoursUntilExpiry -gt 23 -and $stored.HoursUntilExpiry -le 24) "the stored expiry is the service's, not shifted by the time zone ($($stored.HoursUntilExpiry) h)"
+
+        $script:PDGraph.TestTransport = $null
+    }
+}
+
 Add-TestCase 'C04c' 'removal of the local file revokes nothing, and says so' {
     $path = Join-Path $tempRoot 'm5-remove-local\credential.clixml'
     New-PDM5StoredCredential -Path $path -SecretKeyId $script:M5OldKeyId -AppObjectId $script:M5AppId
@@ -4671,7 +4836,7 @@ Add-TestCase 'M5-14' 'provisioning issues the spec 7.2 sequence in order and sto
         Assert-True ($secretAdd -gt $grantWrite) 'and only then was the secret created'
         Assert-True ($trail.Count -eq ($secretAdd + 1)) "nothing was written after the secret ($($trail.Count) calls, last at $secretAdd)"
 
-        Assert-Equal 2 @((Get-PDM5CallTrail -Contains 'POST *appRoleAssignments')).Count 'both roles were granted, once each'
+        Assert-Equal 3 @((Get-PDM5CallTrail -Contains 'POST *appRoleAssignments')).Count 'all three roles were granted, once each'
         Assert-Equal 1 @((Get-PDM5CallTrail -Contains '/addPassword')).Count 'one secret'
         Assert-Equal 1 @(@($script:M5.AppOnlyCalls) -like '*login.microsoftonline.com*').Count 'the new secret was proven with exactly one token request'
         Assert-Equal 0 @(@($script:M5.AppOnlyCalls) -like '*graph.microsoft.com*').Count 'provisioning never uses the upload identity for Graph reads'
@@ -4699,6 +4864,41 @@ Add-TestCase 'M5-14' 'provisioning issues the spec 7.2 sequence in order and sto
         Assert-Equal 0 @(Get-PDM5Mutation).Count 'a dry run issues zero tenant mutations'
         Assert-Equal 0 @((Get-PDM5CallTrail -Contains '*/addPassword')).Count 'including secret creation'
         Assert-True (-not (Test-Path -LiteralPath $dryPath)) 'and no credential file was written'
+
+        $script:PDGraph.TestTransport = $null
+    }
+}
+
+Add-TestCase 'M5-14b' 'Setup/Config on a registration set up before the scripts role grants only that role' {
+    Invoke-PDM5Case -Body {
+        $path = Join-Path $tempRoot 'm5-provision-upgrade\credential.clixml'
+
+        # The registration as the two-role version of Setup left it: both old roles requested and granted.
+        Reset-PDM5Scenario -Apps @(@{ id = $script:M5AppId; appId = $script:M5ClientId; displayName = 'PowerDeploy Intune Upload' }) `
+                           -AppByObjectId @{ $script:M5AppId = @{ appId = $script:M5ClientId; displayName = 'PowerDeploy Intune Upload' } } `
+                           -ServicePrincipals @(
+                                @{ id = $script:M5UploadSpId; appId = $script:M5ClientId; displayName = 'PowerDeploy Intune Upload'; appRoles = @() },
+                                (New-PDM5GraphServicePrincipal)) `
+                           -ExistingGrants @(
+                                @{ id = 'grant-apps';   principalId = $script:M5UploadSpId; resourceId = $script:M5GraphSpId; appRoleId = $script:M5RoleApps },
+                                @{ id = 'grant-groups'; principalId = $script:M5UploadSpId; resourceId = $script:M5GraphSpId; appRoleId = $script:M5RoleGroups }) `
+                           -RequiredResourceAccess @(@{ resourceAppId = $script:M5GraphAppId; resourceAccess = @(
+                                @{ id = $script:M5RoleApps;   type = 'Role' },
+                                @{ id = $script:M5RoleGroups; type = 'Role' }) }) `
+                           -Secret @{ keyId = $script:M5NewKeyId; secretText = 'upgrade-secret-never-real'; endDateTime = ([System.DateTimeOffset]::UtcNow.AddDays(1)).ToString('yyyy-MM-ddTHH:mm:ssZ') }
+        Set-PDM5AppOnlyTransport
+
+        $result = Start-PDGraphUploadProvisioning -Session (New-PDM5Session -TenantId $script:M5TenantId) -CredentialPath $path
+
+        Assert-True $result.Success "provisioning succeeded ($($result.Reason): $($result.Message))"
+        Assert-Equal 1 @($script:M5.Grants).Count 'exactly one new grant'
+        Assert-Equal $script:M5RoleScripts ([string]@($script:M5.Grants)[0].appRoleId) 'and it is the scripts role'
+        Assert-Like "*$script:M5RoleScripts*" ([string]$script:M5.PatchedResourceAccess) 'the scripts role was added to the requested permissions'
+        Assert-Like "*$script:M5RoleApps*" ([string]$script:M5.PatchedResourceAccess) 'without dropping the apps role'
+        Assert-Like "*$script:M5RoleGroups*" ([string]$script:M5.PatchedResourceAccess) 'or the groups role'
+        Assert-Equal 0 @((Get-PDM5Mutation) | Where-Object { $_ -like 'DELETE *' }).Count 'nothing was removed'
+        Assert-Match 'expires \d{4}-\d{2}-\d{2} \d{2}:\d{2} local time' $result.Message 'the saved-secret message shows date and time'
+        Assert-Match 'expiring \d{4}-\d{2}-\d{2} \d{2}:\d{2} local time' (@($result.Steps | Where-Object { $_.Step -eq 'Save' })[0].Message) 'and so does the Save step'
 
         $script:PDGraph.TestTransport = $null
     }
@@ -4735,14 +4935,26 @@ Add-TestCase 'M5-16' 'the connection test proves token, roles and one small Intu
         New-PDM5StoredCredential -Path $path -SecretKeyId $script:M5OldKeyId -AppObjectId $script:M5AppId
 
         Reset-PDM5Scenario
-        Set-PDM5AppOnlyTransport -Roles @('DeviceManagementApps.ReadWrite.All', 'Group.Read.All')
+        Set-PDM5AppOnlyTransport -Roles @('DeviceManagementApps.ReadWrite.All', 'DeviceManagementScripts.ReadWrite.All', 'Group.Read.All')
 
         $result = Test-PDGraphUploadConnection -CredentialPath $path
         Assert-True $result.Success "the connection test passes ($($result.Message))"
         Assert-Equal 1 @(@($script:M5.AppOnlyCalls) -like '*login.microsoftonline.com*').Count 'one token request, forced rather than cached'
         $intuneReads = @(@($script:M5.AppOnlyCalls) -like '*beta/deviceAppManagement/mobileApps*')
-        Assert-Equal 1 @($intuneReads).Count 'one small Intune read, on the resource that matters'
+        Assert-Equal 1 @($intuneReads).Count 'one small Intune apps read, on the resource that matters'
+        $scriptReads = @(@($script:M5.AppOnlyCalls) -like '*beta/deviceManagement/deviceManagementScripts*')
+        Assert-Equal 1 @($scriptReads).Count 'and one small Intune scripts read'
+        Assert-Equal 0 @(@($script:M5.AppOnlyCalls) | Where-Object { $_ -notlike 'Get *' -and $_ -notlike '*login.microsoftonline.com*' }).Count 'both reads are GETs: the test writes nothing'
+        Assert-True ($result.AppsRead.Success -and $result.ScriptsRead.Success) 'both reads are reported as OK'
+        Assert-Match '\d{4}-\d{2}-\d{2} \d{2}:\d{2} local time' $result.Message 'the expiry is shown with its time'
         Assert-Like '*Multi-Admin Approval*' (@($result.Warnings) -join ' | ') 'and it warns that a read proves nothing about MAA'
+
+        Reset-PDM5Scenario
+        Set-PDM5AppOnlyTransport -Roles @('DeviceManagementApps.ReadWrite.All', 'Group.Read.All')
+        $noScripts = Test-PDGraphUploadConnection -CredentialPath $path
+        Assert-True (-not $noScripts.Success) 'a registration set up before the scripts role was added fails the test'
+        Assert-Equal 'MissingRoles' $noScripts.Reason 'as a missing role'
+        Assert-Like '*DeviceManagementScripts.ReadWrite.All*' $noScripts.Message 'naming the scripts role'
 
         Reset-PDM5Scenario
         Set-PDM5AppOnlyTransport -Roles @('Group.Read.All')
@@ -4756,6 +4968,81 @@ Add-TestCase 'M5-16' 'the connection test proves token, roles and one small Intu
         $revoked = Test-PDGraphUploadConnection -CredentialPath $path
         Assert-True (-not $revoked.Success) 'a revoked secret fails the test'
         Assert-Equal 'TokenFailed' $revoked.Reason 'at the token step'
+
+        $script:PDGraph.TestTransport = $null
+    }
+}
+
+Add-TestCase 'M5-16b' 'the connection test reports the apps and scripts reads separately, and one failing never hides the other' {
+    Invoke-PDM5Case -Body {
+        $path = Join-Path $tempRoot 'm5-connection-reads\credential.clixml'
+        New-PDM5StoredCredential -Path $path -SecretKeyId $script:M5OldKeyId -AppObjectId $script:M5AppId
+
+        # Scripts refused, apps fine.
+        Reset-PDM5Scenario
+        Set-PDM5AppOnlyTransport -ScriptsReadStatus 403
+        $scriptsDown = Test-PDGraphUploadConnection -CredentialPath $path
+        Assert-True (-not $scriptsDown.Success) 'a failed scripts read fails the test'
+        Assert-Equal 'ReadFailed' $scriptsDown.Reason 'as a read failure'
+        Assert-True $scriptsDown.AppsRead.Requested 'the apps read ran'
+        Assert-True $scriptsDown.AppsRead.Success 'and is reported OK'
+        Assert-True $scriptsDown.ScriptsRead.Requested 'the scripts read ran'
+        Assert-True (-not $scriptsDown.ScriptsRead.Success) 'and is reported failed'
+        Assert-Like '*scripts read failed*' $scriptsDown.Message 'the message names the scripts read'
+        Assert-Like '*apps read succeeded*' $scriptsDown.Message 'and still says the apps read worked'
+        Assert-Equal 1 @(@($script:M5.AppOnlyCalls) -like '*deviceManagementScripts*').Count 'the scripts read was attempted once (403 is not retried)'
+
+        # Apps refused, scripts fine: the second read still runs.
+        Reset-PDM5Scenario
+        Set-PDM5AppOnlyTransport -AppsReadStatus 403
+        $appsDown = Test-PDGraphUploadConnection -CredentialPath $path
+        Assert-True (-not $appsDown.Success) 'a failed apps read fails the test'
+        Assert-True (-not $appsDown.AppsRead.Success) 'apps reported failed'
+        Assert-True $appsDown.ScriptsRead.Success 'scripts still read and reported OK'
+        Assert-Equal 1 @(@($script:M5.AppOnlyCalls) -like '*deviceManagementScripts*').Count 'the scripts read ran after the apps read failed'
+        Assert-Like '*apps read failed*' $appsDown.Message 'the message names the apps read'
+
+        # Neither read is attempted when it was not asked for, and that is said.
+        Reset-PDM5Scenario
+        Set-PDM5AppOnlyTransport
+        $skipped = Test-PDGraphUploadConnection -CredentialPath $path -SkipIntuneRead
+        Assert-True $skipped.Success 'token and roles alone can pass when reads are skipped'
+        Assert-True ((-not $skipped.AppsRead.Requested) -and (-not $skipped.ScriptsRead.Requested)) 'both reads say they were not requested'
+        Assert-Equal 0 @(@($script:M5.AppOnlyCalls) -like '*graph.microsoft.com*').Count 'and no Graph read was sent'
+
+        $script:PDGraph.TestTransport = $null
+    }
+}
+
+Add-TestCase 'M5-16c' 'the registration needs exactly the three application roles, in one list' {
+    $roles = @($script:PDGraph.RequiredAppRoles)
+    Assert-Equal 3 $roles.Count 'exactly three required roles'
+    foreach ($expected in @('DeviceManagementApps.ReadWrite.All', 'DeviceManagementScripts.ReadWrite.All', 'Group.Read.All')) {
+        Assert-True ($roles -ccontains $expected) "$expected is required"
+    }
+    Assert-Equal '/beta/deviceManagement/deviceManagementScripts?$top=1&$select=id,displayName' ([string]$script:PDGraph.ScriptsConnectionTestPath) 'the scripts connection-test read is a one-item, two-field GET'
+}
+
+Add-TestCase 'M5-16d' 'a hand-entered secret is judged expired as a time, and its expiry is shown with the time' {
+    Invoke-PDM5Case -Body {
+        # Regression: the candidate holds the expiry as the on-disk ISO string; it was compared as
+        # text (never "expired") and formatted with a DateTime-only overload (an error on success).
+        Reset-PDM5Scenario
+        Set-PDM5AppOnlyTransport
+        $expired = Test-PDGraphUploadCandidateCredential -TenantId $script:M5TenantId -ClientId $script:M5ClientId `
+                        -ClientSecret (New-FakeSecureString -Value 'manual-secret-never-real') -SecretExpiresOn ([System.DateTimeOffset]::UtcNow.AddHours(-1))
+        Assert-True (-not $expired.Valid) 'an expired hand-entered secret is refused'
+        Assert-Equal 'Expired' $expired.Reason 'as expired'
+        Assert-Match 'expired at \d{4}-\d{2}-\d{2} \d{2}:\d{2} local time' $expired.Message 'with the time it expired'
+        Assert-Equal 0 @(@($script:M5.AppOnlyCalls) -like '*login.microsoftonline.com*').Count 'and no token was requested for it'
+
+        Reset-PDM5Scenario
+        Set-PDM5AppOnlyTransport
+        $valid = Test-PDGraphUploadCandidateCredential -TenantId $script:M5TenantId -ClientId $script:M5ClientId -SecretKeyId $script:M5OldKeyId `
+                        -ClientSecret (New-FakeSecureString -Value 'manual-secret-never-real') -SecretExpiresOn ([System.DateTimeOffset]::UtcNow.AddHours(20))
+        Assert-True $valid.Valid "a working hand-entered secret passes ($($valid.Message))"
+        Assert-Match 'expires \d{4}-\d{2}-\d{2} \d{2}:\d{2} local time' $valid.Message 'and its expiry is shown with the time'
+        Assert-NotLike '*manual-secret-never-real*' ([string]($valid.Message)) 'the secret value is never in the message'
 
         $script:PDGraph.TestTransport = $null
     }
@@ -4775,6 +5062,11 @@ Add-TestCase 'M5-17' 'the MAA menu only reads its own text and calls no tenant e
     Assert-Like '*justification*' (@($guidance.Steps) -join ' -> ') 'including the justification step'
     Assert-Like '*application-only*' (@($guidance.Notes) -join ' | ') 'what the exclusion covers'
     Assert-Like '*rotat*' (@($guidance.Notes) -join ' | ') 'and that rotation does not undo it'
+    Assert-Like '*Apps policy*' (@($guidance.Steps) -join ' -> ') 'the Apps policy exclusion'
+    Assert-Like '*Scripts profile type*Exclusions*' (@($guidance.Steps) -join ' -> ') 'and, separately, the Scripts policy exclusion'
+    Assert-Like '*second admin*' (@($guidance.Notes) -join ' | ') 'each exclusion change needs a second admin'
+    Assert-Like '*Not yet confirmed*remediations*' (@($guidance.Notes) -join ' | ') 'remediation coverage is stated as unconfirmed'
+    Assert-Like '*Scripts policy*' $guidance.Message 'the one-line summary names both policies'
     Assert-Equal 0 @($script:M5.Calls).Count 'showing MAA instructions makes no Graph call at all'
 
     # With no credential stored it still answers, from the built-in defaults.
