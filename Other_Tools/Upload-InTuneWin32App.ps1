@@ -518,7 +518,7 @@ function Start-PDIntunePreflight {
             if (-not $hit) { $missingRoles += $role }
         }
         if ($missingRoles.Count -gt 0) {
-            Stop-PDGraphError -Message ("The upload identity's token does not include {0}. Grant the missing application role(s) to the app registration in Entra, then retry. No tenant resource was touched." -f (($missingRoles | ForEach-Object { "'$_'" }) -join ', ')) -Stage 'Credential'
+            Stop-PDGraphError -Message ("The upload identity's token does not include {0}. Run InTuneAPI--Setup-and-Manage > Azure App Registration - Setup/Config > Automatic. It needs an Entra admin sign-in, grants only the missing permission(s), and also creates and saves a new client secret for this PC; then retry. No tenant resource was touched." -f (($missingRoles | ForEach-Object { "'$_'" }) -join ', ')) -Stage 'Credential'
         }
     } else {
         $warnings += 'The token carried no readable application roles, so permissions could not be confirmed before writing. The first Graph call will report any missing permission.'

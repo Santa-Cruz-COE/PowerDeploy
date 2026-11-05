@@ -554,6 +554,8 @@ Add-TestCase 'C02d' 'Expiry messages show the date and the local time, and time 
     $now = $when.AddHours(-30).AddMinutes(-5)
     Assert-Equal '30 hour(s) 5 minute(s)' (Format-PDGraphTimeRemaining -ExpiresOn $when -Now $now) 'hours under two days'
     Assert-Equal '45 minute(s)' (Format-PDGraphTimeRemaining -ExpiresOn $when -Now $when.AddMinutes(-45)) 'minutes under an hour'
+    Assert-Equal '1 minute(s)' (Format-PDGraphTimeRemaining -ExpiresOn $when -Now $when.AddSeconds(-119)) 'rounded down: 1 min 59 s is 1 minute'
+    Assert-Equal 'less than 1 minute' (Format-PDGraphTimeRemaining -ExpiresOn $when -Now $when.AddSeconds(-30)) 'under a minute never claims a whole minute'
     Assert-Equal '3 day(s)' (Format-PDGraphTimeRemaining -ExpiresOn $when -Now $when.AddDays(-3).AddHours(-5)) 'whole days beyond two days, rounded down'
     Assert-Like '*expired*' (Format-PDGraphTimeRemaining -ExpiresOn $when -Now $when.AddSeconds(1)) 'after expiry'
 
@@ -4680,7 +4682,12 @@ Add-TestCase 'C04b' 'when the old key cannot be revoked the new credential stays
         Assert-Equal 'RotatedOldKeyActive' $result.Reason 'and the surviving old key is named as the reason'
         Assert-True (-not $result.OldKeyRemoved) 'the old key was not removed'
         Assert-Equal $script:M5OldKeyId ([string]$result.LeftoverKeyId) 'the leftover key id is reported, not hidden'
-        Assert-Like '*still active*' $result.Message 'the operator is told it is still active'
+        Assert-Equal 'DeleteFailed' ([string]$result.OldKeyOutcome) 'the old-key outcome is named'
+        Assert-Equal "The previous client secret (Secret ID $script:M5OldKeyId) could not be deleted from Entra (HTTP 403: Authorization_RequestDenied: Insufficient privileges to complete the operation). Delete it in the Entra admin center > App registrations > PowerDeploy Intune Upload > Certificates & secrets." ([string]$result.OldKeyMessage) 'the operator is told, with the short reason and where to delete it'
+        Assert-NotLike '*stage:*' $result.OldKeyMessage 'no stage tag in the sentence'
+        Assert-NotLike '*request-id*' $result.OldKeyMessage 'no request id in the sentence'
+        Assert-NotLike '*`[detail:*' $result.OldKeyMessage 'no detail tag in the sentence'
+        Assert-Equal 'mock-req' ([string]$result.OldKeyRequestId) 'the request id is kept apart, for the support line'
         Assert-NotLike '*replacement-secret-never-real*' ([string]($result | ConvertTo-Json -Depth 5 -Compress)) 'no secret value in the result'
 
         $stored = Get-PDGraphCredential -Path $path
@@ -4699,7 +4706,7 @@ Add-TestCase 'C04b' 'when the old key cannot be revoked the new credential stays
     }
 }
 
-Add-TestCase 'C04d' 'an EXPIRED secret rotates to a 1-day one, the old key is revoked, and the messages show date and time' {
+Add-TestCase 'C04e' 'an EXPIRED secret rotates to a 1-day one, the old key is revoked, and the messages show date and time' {
     Invoke-PDM5Case -Body {
         $path = Join-Path $tempRoot 'm5-rotate-expired\credential.clixml'
         New-PDM5StoredCredential -Path $path -SecretKeyId $script:M5OldKeyId -AppObjectId $script:M5AppId -TenantId $script:M5TenantId -ClientId $script:M5ClientId -DaysFromNow (-0.25)
@@ -4715,8 +4722,11 @@ Add-TestCase 'C04d' 'an EXPIRED secret rotates to a 1-day one, the old key is re
         Assert-True $result.Success ("an expired secret still rotates ({0}: {1})" -f [string]$result.Reason, [string]$result.Message)
         Assert-Equal 'Rotated' $result.Reason 'and the old key was revoked'
         Assert-Equal $script:M5OldKeyId ([string]@($script:M5.Revoked | ForEach-Object { if ([string]$_ -match '([0-9a-fA-F-]{36})') { $matches[1] } })[0]) 'the revoked key is the old one'
+        Assert-Equal 'Deleted' ([string]$result.OldKeyOutcome) 'the old-key outcome is named'
+        Assert-Match ('^The previous client secret \(Secret ID {0}, expiring \d{{4}}-\d{{2}}-\d{{2}} \d{{2}}:\d{{2}} local time\) was deleted from Entra\.$' -f [regex]::Escape($script:M5OldKeyId)) $result.OldKeyMessage 'one sentence: which secret, when it would have expired, deleted'
+        Assert-NotLike '*previous*' $result.Message 'and the new-secret message does not repeat it'
         Assert-Match 'expiring \d{4}-\d{2}-\d{2} \d{2}:\d{2} local time' $result.Message 'the rotation message shows the new expiry with its time'
-        Assert-Match 'expired at \d{4}-\d{2}-\d{2} \d{2}:\d{2} local time' (@($result.Warnings) -join ' | ') 'and the expired warning shows the old one with its time'
+        Assert-Equal 0 @(@($result.Warnings) | Where-Object { $_ -like '*expired*' }).Count 'a successful rotation carries no stale "expired" warning'
         Assert-NotLike '*renewed-secret-never-real*' ([string]($result | ConvertTo-Json -Depth 5 -Compress)) 'no secret value in the result'
 
         # Read the raw text: ConvertFrom-Json on PowerShell 7 turns the ISO date into a DateTime whose
@@ -4734,7 +4744,287 @@ Add-TestCase 'C04d' 'an EXPIRED secret rotates to a 1-day one, the old key is re
         # ConvertFrom-Json turns it into a DateTime, which once was re-read as local time).
         Assert-True ($stored.HoursUntilExpiry -gt 23 -and $stored.HoursUntilExpiry -le 24) "the stored expiry is the service's, not shifted by the time zone ($($stored.HoursUntilExpiry) h)"
 
+        # When the rotation FAILS, the expired note is what tells the operator nothing works now.
+        $failPath = Join-Path $tempRoot 'm5-rotate-expired-fail\credential.clixml'
+        New-PDM5StoredCredential -Path $failPath -SecretKeyId $script:M5OldKeyId -AppObjectId $script:M5AppId -TenantId $script:M5TenantId -ClientId $script:M5ClientId -DaysFromNow (-0.25) | Out-Null
+        Reset-PDM5Scenario -AppByObjectId @{ $script:M5AppId = @{ appId = $script:M5ClientId; displayName = 'PowerDeploy Intune Upload' } } `
+                           -Secret @{ keyId = $script:M5NewKeyId; secretText = 'unusable-never-real'; endDateTime = ([System.DateTimeOffset]::UtcNow.AddDays(1)).ToString('yyyy-MM-ddTHH:mm:ssZ') } `
+                           -TokenFailure 'AADSTS7000215: Invalid client secret provided.'
+        Set-PDM5AppOnlyTransport -Failure 'AADSTS7000215: Invalid client secret provided.'
+        $failed = Start-PDGraphSecretRotation -CredentialPath $failPath -Session (New-PDM5Session -TenantId $script:M5TenantId) -SecretLifetimeDays 1
+        Assert-True (-not $failed.Success) 'the rotation failed'
+        Assert-Match 'expired at \d{4}-\d{2}-\d{2} \d{2}:\d{2} local time, so until a rotation succeeds there is no working credential' (@($failed.Warnings) -join ' | ') 'and then the expired note is kept'
+
         $script:PDGraph.TestTransport = $null
+    }
+}
+
+Add-TestCase 'C06' 'after every renewal, menu or before an upload, exactly one line says what happened to the previous secret' {
+    $savedRoot = $env:LOCALAPPDATA
+    $root      = Join-Path $tempRoot 'c06-localappdata'
+    try {
+        $env:LOCALAPPDATA = $root
+        . ([scriptblock]::Create((Import-PDSetupFunctionText -Name 'Invoke-GraphUploadRotateSecret')))
+
+        function Write-Log { param([string]$Message, [string]$Level) $script:C06.Log += ('[{0}] {1}' -f $Level, $Message) }
+        function Show-GraphUploadError { param($Failure) $script:C06.Log += ('[ERROR] {0}' -f [string]$Failure) }
+        function Confirm-GraphUploadAdminModule { param([string]$Purpose) return $true }
+        function Show-GraphUploadCredentialState { return @{ Stored = $true } }
+        function Read-GraphUploadSecretLifetime { param([int]$Default) return 1 }
+        function Connect-GraphUploadAdminSession { param([switch]$IncludeConsent, [string]$Purpose, [string]$TenantId) $script:C06.Connects++; $script:C06.Purpose = $Purpose; return (New-PDM5Session -TenantId $script:M5TenantId) }
+        function Disconnect-PDGraphInteractive { param($Session) $script:C06.Disconnects++; return @{ Message = 'closed' } }
+        # Deleting the previous secret is never a question.
+        function Read-GraphUploadYesNo { param([string]$Question, [bool]$Default, [string]$Note) throw "nothing should be asked here (asked: $Question)" }
+
+        $path = Get-PDGraphCredentialPath
+        Assert-Like "$root*" $path 'the credential path is the temporary one, never the real store'
+
+        $secretId = 'bbbbbbb2-0000-0000-0000-000000000009'
+        $portal   = 'Delete it in the Entra admin center > App registrations > PowerDeploy Intune Upload > Certificates & secrets.'
+
+        foreach ($pathKind in @('menu', 'quiet')) {
+            foreach ($scenario in @('ManualWithSecretId', 'DeleteFails', 'NoSecretId')) {
+                $what = '{0} path, {1}' -f $pathKind, $scenario
+                $script:C06 = @{ Log = @(); Connects = 0; Disconnects = 0 }
+
+                Invoke-PDM5Case -Body {
+                    # The credential exactly as the Manual option stores it: tested, then saved,
+                    # with or without the Secret ID the operator typed. Expired, as before an upload.
+                    Reset-PDM5Scenario
+                    Set-PDM5AppOnlyTransport
+                    $typedId = $(if ($scenario -eq 'NoSecretId') { '' } else { $secretId })
+                    $check = Test-PDGraphUploadCandidateCredential -TenantId $script:M5TenantId -ClientId $script:M5ClientId -SecretKeyId $typedId `
+                                -ClientSecret (New-FakeSecureString -Value 'manual-secret-never-real') -SecretExpiresOn ([System.DateTimeOffset]::UtcNow.AddHours(1))
+                    Assert-True $check.Valid "$what - the hand-entered credential passes ($($check.Message))"
+                    $credential = $check.Credential
+                    $credential['SecretExpiresOn'] = ([System.DateTimeOffset]::UtcNow.AddMinutes(-30)).ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+                    $null = Save-PDGraphCredential -Credential $credential -Path $path
+                    Assert-Equal $typedId ([string](Get-PDGraphCredentialMetadata -Path $path).SecretKeyId) "$what - the typed Secret ID is what is stored"
+
+                    $failures = @()
+                    if ($scenario -eq 'DeleteFails') { $failures = @(@{ Method = 'POST'; Match = 'removePassword'; Kind = 'http'; Status = 403; Code = 'Authorization_RequestDenied'; Message = 'Insufficient privileges to complete the operation.' }) }
+                    Reset-PDM5Scenario -Apps @(@{ id = $script:M5AppId; appId = $script:M5ClientId; displayName = 'PowerDeploy Intune Upload' }) `
+                                       -AppByObjectId @{ $script:M5AppId = @{ appId = $script:M5ClientId; displayName = 'PowerDeploy Intune Upload' } } `
+                                       -Secret @{ keyId = $script:M5NewKeyId; secretText = 'replacement-never-real'; endDateTime = ([System.DateTimeOffset]::UtcNow.AddDays(1)).ToString('yyyy-MM-ddTHH:mm:ssZ') } `
+                                       -Failures $failures
+                    Set-PDM5AppOnlyTransport
+
+                    $lifetime = $(if ($pathKind -eq 'quiet') { 1 } else { 0 })
+                    $ok = Invoke-GraphUploadRotateSecret -LifetimeDays $lifetime
+
+                    Assert-True $ok "$what - the renewal counts as done"
+                    Assert-Equal $script:M5NewKeyId ([string](Get-PDGraphCredential -Path $path).SecretKeyId) "$what - the new credential is saved at the temporary path"
+                    Assert-Equal 1 $script:C06.Connects "$what - exactly one sign-in"
+                    Assert-Equal 1 $script:C06.Disconnects "$what - closed once"
+
+                    # Exactly one line about the previous or stored secret in the whole run, and after
+                    # "Rotation finished" no WARNING/ERROR/SUCCESS line other than that outcome line.
+                    $about = @(@($script:C06.Log) | Where-Object { $_ -match '(?i)previous|stored secret|old secret' })
+                    Assert-Equal 1 @($about).Count ("$what - exactly one line about the previous or stored secret ({0})" -f (@($about) -join ' || '))
+                    $line = [string]@($about)[0]
+
+                    $finished = -1
+                    for ($i = 0; $i -lt @($script:C06.Log).Count; $i++) { if ([string]@($script:C06.Log)[$i] -like '`[SUCCESS`] Rotation finished.*') { $finished = $i; break } }
+                    Assert-True ($finished -ge 0) "$what - the new-secret line is there"
+                    $after = @(@($script:C06.Log)[($finished + 1)..(@($script:C06.Log).Count - 1)] | Where-Object { $_ -notlike '`[INFO2`]*' -and $_ -notlike '`[INFO`]*' })
+                    Assert-Equal 1 @($after).Count ("$what - after the rotation only the outcome line is not INFO ({0})" -f (@($after) -join ' || '))
+                    Assert-Equal $line ([string]@($after)[0]) "$what - and it is the outcome line"
+
+                    if ($scenario -eq 'NoSecretId') {
+                        Assert-Equal 'add a new secret for this PC' ([string]$script:C06.Purpose) "$what - the sign-in does not promise a removal"
+                        Assert-NotLike '*old one*' (@($script:C06.Log | Where-Object { $_ -like '*Adding a new secret*' }) -join ' ') "$what - nor does the progress line"
+                    } else {
+                        Assert-Like '*remove the old one*' ([string]$script:C06.Purpose) "$what - the sign-in says the old one is removed"
+                    }
+                    $attempts = @(@($script:M5.Bodies) | Where-Object { $_.Uri -like '*/removePassword' } | ForEach-Object { [string](($_.Body | ConvertFrom-Json).keyId) })
+
+                    if ($scenario -eq 'ManualWithSecretId') {
+                        Assert-Match ('^\[SUCCESS\] The previous client secret \(Secret ID {0}, expiring \d{{4}}-\d{{2}}-\d{{2}} \d{{2}}:\d{{2}} local time\) was deleted from Entra\.$' -f [regex]::Escape($secretId)) $line "$what - the deleted line, with the Secret ID"
+                        Assert-Equal 1 @($script:M5.Revoked).Count "$what - one deletion"
+                        Assert-Equal $secretId ([string]@($script:M5.Revoked)[0]) "$what - by the Secret ID that was typed in"
+                    } elseif ($scenario -eq 'DeleteFails') {
+                        Assert-Equal ("[WARNING] The previous client secret (Secret ID {0}) could not be deleted from Entra (HTTP 403: Authorization_RequestDenied: Insufficient privileges to complete the operation). {1}" -f $secretId, $portal) $line "$what - the could-not-be-deleted line, with the short reason only"
+                        Assert-True (@($script:C06.Log) -contains '[INFO2]      For support: Microsoft Graph request id mock-req') "$what - the request id goes to its own INFO line"
+                        Assert-Equal 1 $attempts.Count "$what - one attempt"
+                        Assert-Equal $secretId $attempts[0] "$what - for the recorded id"
+                    } else {
+                        Assert-Equal ("[WARNING] No Secret ID was found for the previous client secret, so Setup assumes it was entered by hand through the Manual option. It was NOT deleted. If no other PC uses it, delete it in the Entra admin center > App registrations > PowerDeploy Intune Upload > Certificates & secrets.") $line "$what - the assumes-hand-entered line"
+                        Assert-Equal 0 $attempts.Count "$what - no deletion was attempted"
+                        Assert-Equal 0 @((Get-PDM5CallTrail -Contains 'passwordCredentials')).Count "$what - and the registration's secrets were not even read"
+                    }
+
+                    Assert-NotLike '*never-real*' (@($script:C06.Log) -join ' | ') "$what - no secret value is ever printed"
+                    $script:PDGraph.TestTransport = $null
+                } | Out-Null
+            }
+        }
+    } finally {
+        $env:LOCALAPPDATA = $savedRoot
+        $script:C06 = $null
+    }
+}
+
+Add-TestCase 'C04i' 'a Manual entry with a Secret ID stores it, and rotation later revokes exactly that id' {
+    Invoke-PDM5Case -Body {
+        $path     = Join-Path $tempRoot 'm5-manual-secretid\credential.clixml'
+        $secretId = 'bbbbbbb2-0000-0000-0000-000000000009'
+
+        # What Invoke-GraphUploadEnterCredential does with the answers: test, then save.
+        Reset-PDM5Scenario
+        Set-PDM5AppOnlyTransport
+        $check = Test-PDGraphUploadCandidateCredential -TenantId $script:M5TenantId -ClientId $script:M5ClientId -SecretKeyId $secretId `
+                    -ClientSecret (New-FakeSecureString -Value 'manual-secret-never-real') -SecretExpiresOn ([System.DateTimeOffset]::UtcNow.AddDays(30))
+        Assert-True $check.Valid "the hand-entered credential passes ($($check.Message))"
+        $null = Save-PDGraphCredential -Credential $check.Credential -Path $path
+        Assert-Equal $secretId ([string](Get-PDGraphCredential -Path $path).SecretKeyId) 'the Secret ID is stored as the key id'
+
+        Reset-PDM5Scenario -AppByObjectId @{ $script:M5AppId = @{ appId = $script:M5ClientId; displayName = 'PowerDeploy Intune Upload' } } `
+                           -Apps @(@{ id = $script:M5AppId; appId = $script:M5ClientId; displayName = 'PowerDeploy Intune Upload' }) `
+                           -Secret @{ keyId = $script:M5NewKeyId; secretText = 'replacement-never-real'; endDateTime = ([System.DateTimeOffset]::UtcNow.AddDays(1)).ToString('yyyy-MM-ddTHH:mm:ssZ') }
+        Set-PDM5AppOnlyTransport
+        $result = Start-PDGraphSecretRotation -CredentialPath $path -Session (New-PDM5Session -TenantId $script:M5TenantId) -SecretLifetimeDays 1
+
+        Assert-Equal 'Rotated' $result.Reason ("rotated ({0})" -f [string]$result.Message)
+        Assert-Equal $secretId ([string]@($script:M5.Revoked)[0]) 'the revoked key is the Secret ID that was entered'
+        Assert-Equal 'Deleted' ([string]$result.OldKeyOutcome) 'reported as deleted'
+        Assert-Like ("The previous client secret (Secret ID {0}, expiring * local time) was deleted from Entra." -f $secretId) $result.OldKeyMessage 'with that Secret ID'
+
+        # And Setup asks for it, by the name Entra uses, and passes it on.
+        $manual = [string](Get-PDM5SetupFunction -Name 'Invoke-GraphUploadEnterCredential').Extent.Text
+        Assert-Like '*Secret ID (GUID, or Enter to skip)*' $manual 'the Manual option asks for the Secret ID'
+        Assert-Like '*Certificates & secrets*' $manual 'and says where Entra shows it'
+        Assert-Like '*-SecretKeyId $SecretKeyId*' $manual 'and hands it to the credential test and save'
+        Assert-Like '*can delete it from Entra automatically when it is next renewed*' $manual 'what giving it does'
+        Assert-Like '*you delete this client secret from Entra by hand*' $manual 'and what skipping it means'
+        Assert-NotLike '*first characters*' $manual 'nothing is said about matching'
+
+        $script:PDGraph.TestTransport = $null
+    }
+}
+
+Add-TestCase 'C04j' 'a token is never requested for an expired candidate, whatever shape its expiry is in' {
+    # A candidate from New-PDGraphCredentialObject holds the ISO string; the guard once compared
+    # that string to a DateTimeOffset, which is never true.
+    $expired = New-PDGraphCredentialObject -TenantId $script:M5TenantId -ClientId $script:M5ClientId `
+                    -ClientSecret (New-FakeSecureString) -SecretExpiresOn ([System.DateTimeOffset]::UtcNow.AddMinutes(-5))
+    Assert-True ($expired.SecretExpiresOn -is [string]) 'the candidate really holds a string'
+    Assert-Throws -Body { Get-PDGraphToken -Credential $expired -Force } -MessagePattern '*expired*' 'an expired candidate is refused before any request' | Out-Null
+
+    $garbled = @{ TenantId = $script:M5TenantId; ClientId = $script:M5ClientId; ClientSecret = (New-FakeSecureString); SecretExpiresOn = 'not a date' }
+    Assert-Throws -Body { Get-PDGraphToken -Credential $garbled -Force } -MessagePattern '*cannot be read*' 'an unreadable expiry is refused, not ignored' | Out-Null
+    # (The runner's tripwire transport throws a different message if a request had been sent.)
+}
+
+# --- Setup's renewal offer, run for real with its prompts and the rotation replaced ----------------
+
+function Import-PDSetupFunctionText {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    return [string](Get-PDM5SetupFunction -Name $Name).Extent.Text
+}
+
+Add-TestCase 'C05a' 'the renewal offer: Ok asks nothing; Soon declined continues; Expired declined stops; Yes renews' {
+    $savedRoot = $env:LOCALAPPDATA
+    $root      = Join-Path $tempRoot 'c05a-localappdata'
+    try {
+        # Never the real store: Setup's helper reads the default path, so the default moves here.
+        $env:LOCALAPPDATA = $root
+        . ([scriptblock]::Create((Import-PDSetupFunctionText -Name 'Confirm-GraphUploadSecretFresh')))
+
+        $script:C05 = @{ Log = @(); Asked = 0; Answer = $true; Rotations = @(); RotateResult = $true }
+        function Write-Log { param([string]$Message, [string]$Level) $script:C05.Log += ('[{0}] {1}' -f $Level, $Message) }
+        function Read-GraphUploadYesNo { param([string]$Question, [bool]$Default, [string]$Note) $script:C05.Asked++; $script:C05.LastQuestion = $Question; $script:C05.LastNote = $Note; $script:C05.LastDefault = $Default; return $script:C05.Answer }
+        function Invoke-GraphUploadRotateSecret { param([int]$LifetimeDays) $script:C05.Rotations += $LifetimeDays; return $script:C05.RotateResult }
+
+        $path = Get-PDGraphCredentialPath
+        Assert-Like "$root*" $path 'the test store is the temporary one'
+
+        $store = {
+            param($Minutes)
+            $c = New-PDGraphCredentialObject -TenantId $script:M5TenantId -ClientId $script:M5ClientId -ClientSecret (New-FakeSecureString) `
+                    -SecretExpiresOn ([System.DateTimeOffset]::UtcNow.AddMinutes($Minutes))
+            $null = Save-PDGraphCredential -Credential $c -Path $path
+        }
+
+        # Nothing stored: carry on, ask nothing.
+        Assert-True (Confirm-GraphUploadSecretFresh) 'no file: the caller handles it'
+        Assert-Equal 0 $script:C05.Asked 'nothing asked'
+
+        # Plenty left: carry on, ask nothing.
+        & $store (20 * 60)
+        Assert-True (Confirm-GraphUploadSecretFresh) 'a fresh secret: carry on'
+        Assert-Equal 0 $script:C05.Asked 'nothing asked'
+
+        # Soon, declined: continue with the current secret, and say how long it has.
+        & $store 90
+        $script:C05.Answer = $false
+        Assert-True (Confirm-GraphUploadSecretFresh) 'declining with time left continues the upload'
+        Assert-Equal 1 $script:C05.Asked 'it was asked once'
+        Assert-Like 'Sign in now and create a new 24-hour client secret?' $script:C05.LastQuestion 'the question'
+        Assert-True $script:C05.LastDefault 'Enter means yes'
+        Assert-Like '*deleted from Entra by its recorded Secret ID; if none is recorded, Setup assumes it was entered by hand and leaves it for you to delete*' $script:C05.LastNote 'the note states the real rule, not a promise'
+        Assert-NotLike '*for certain*' $script:C05.LastNote 'and claims no certainty'
+        Assert-Like '*Continuing with the current secret*hour(s)*' (@($script:C05.Log) -join ' | ') 'a one-line note with the time left'
+        Assert-Equal 0 @($script:C05.Rotations).Count 'no rotation'
+
+        # Expired, declined: stop.
+        & $store (-30)
+        Assert-True (-not (Confirm-GraphUploadSecretFresh)) 'declining an expired secret stops the API upload'
+
+        # Yes: the rotation runs with the default lifetime and its answer is passed on.
+        $script:C05.Answer = $true
+        $script:C05.RotateResult = $true
+        Assert-True (Confirm-GraphUploadSecretFresh) 'a successful renewal continues'
+        Assert-Equal 1 @($script:C05.Rotations)[0] 'with the 1-day default and no lifetime question'
+        $script:C05.RotateResult = $false
+        Assert-True (-not (Confirm-GraphUploadSecretFresh)) 'a failed renewal of an expired secret stops'
+    } finally {
+        $env:LOCALAPPDATA = $savedRoot
+        $script:C05 = $null
+    }
+}
+
+Add-TestCase 'C05b' 'renewing before an upload is quiet and reuses the stored tenant; the menu option is unchanged' {
+    $savedRoot = $env:LOCALAPPDATA
+    $root      = Join-Path $tempRoot 'c05b-localappdata'
+    try {
+        $env:LOCALAPPDATA = $root
+        . ([scriptblock]::Create((Import-PDSetupFunctionText -Name 'Invoke-GraphUploadRotateSecret')))
+
+        $script:C05 = @{ Log = @(); Shown = 0; LifetimeAsked = 0; Tenants = @() }
+        function Write-Log { param([string]$Message, [string]$Level) $script:C05.Log += ('[{0}] {1}' -f $Level, $Message) }
+        function Confirm-GraphUploadAdminModule { param([string]$Purpose) return $true }
+        function Show-GraphUploadCredentialState { $script:C05.Shown++; return @{ Stored = $true } }
+        function Read-GraphUploadSecretLifetime { param([int]$Default) $script:C05.LifetimeAsked++; return 7 }
+        # Stops the flow right after the sign-in question, so no rotation is attempted.
+        function Connect-GraphUploadAdminSession { param([switch]$IncludeConsent, [string]$Purpose, [string]$TenantId) $script:C05.Tenants += ,([string]$TenantId); return $null }
+
+        $c = New-PDGraphCredentialObject -TenantId $script:M5TenantId -ClientId $script:M5ClientId -ClientSecret (New-FakeSecureString) `
+                -SecretExpiresOn ([System.DateTimeOffset]::UtcNow.AddHours(-3))
+        $storePath = Get-PDGraphCredentialPath
+        Assert-Like "$root*" $storePath 'the credential is read from and saved to the temporary store, never the real one'
+        $null = Save-PDGraphCredential -Credential $c -Path $storePath
+        Assert-True (Test-Path -LiteralPath (Join-Path $root 'PowerDeploy\GraphUpload\credential.clixml')) 'and it is there'
+
+        $quiet = Invoke-GraphUploadRotateSecret -LifetimeDays 1
+        Assert-True (-not $quiet) 'no sign-in means no renewal'
+        Assert-Equal 0 $script:C05.Shown 'the stored-credential panel (and its red expired line) is not shown'
+        Assert-Equal 0 $script:C05.LifetimeAsked 'the lifetime is not asked'
+        Assert-Equal $script:M5TenantId $script:C05.Tenants[0] 'the stored tenant is used, not asked for'
+        Assert-Match "Renewing this PC's client secret \(expired at \d{4}-\d{2}-\d{2} \d{2}:\d{2} local time\)" (@($script:C05.Log) -join ' | ') 'one plain line instead'
+        Assert-Equal 0 @(@($script:C05.Log) | Where-Object { $_ -like '`[ERROR`]*' }).Count 'and no error line'
+
+        $menu = Invoke-GraphUploadRotateSecret
+        Assert-Equal 1 $script:C05.Shown 'the menu option still shows the stored credential'
+        Assert-Equal 1 $script:C05.LifetimeAsked 'and asks the lifetime'
+        Assert-True ([string]::IsNullOrWhiteSpace($script:C05.Tenants[1])) 'and leaves the tenant question to the sign-in'
+
+        # The sign-in skips the tenant question only for a real GUID.
+        $connect = Import-PDSetupFunctionText -Name 'Connect-GraphUploadAdminSession'
+        Assert-True ($connect.Contains('[guid]::TryParse($TenantId.Trim()')) 'a known tenant is checked to be a GUID'
+        Assert-Like '*Read-GraphUploadTenantId*' $connect 'otherwise it is asked for'
+    } finally {
+        $env:LOCALAPPDATA = $savedRoot
+        $script:C05 = $null
     }
 }
 

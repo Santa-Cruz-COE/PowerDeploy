@@ -917,7 +917,10 @@ function Format-PDGraphTimeRemaining {
     if ($left.TotalHours -lt 48) {
         $hours   = [int][math]::Floor($left.TotalHours)
         $minutes = [int]$left.Minutes
-        if ($hours -eq 0) { return ('{0} minute(s)' -f [math]::Max(1, $minutes)) }
+        if ($hours -eq 0) {
+            if ($minutes -lt 1) { return 'less than 1 minute' }
+            return ('{0} minute(s)' -f $minutes)
+        }
         return ('{0} hour(s) {1} minute(s)' -f $hours, $minutes)
     }
 
@@ -1008,7 +1011,7 @@ function Get-PDGraphCredential {
     }
 
     if ([string]::IsNullOrWhiteSpace($credential.SecretKeyId)) {
-        $warnings += 'No secret key id is recorded, so rotation cannot revoke the previous secret automatically; it will report that key for manual cleanup.'
+        $warnings += 'No secret key id (Secret ID) is recorded, so rotation cannot delete the previous secret from Entra; it will say so, and you delete it there yourself.'
     }
 
     $credential.Warnings = $warnings
@@ -1556,8 +1559,17 @@ function Get-PDGraphToken {
     if ($Credential.ClientSecret -isnot [System.Security.SecureString]) {
         Stop-PDGraphError -Message 'The stored credential does not hold a protected secret; re-enter it.' -Stage 'Credential'
     }
-    if ($Credential.SecretExpiresOn -and ($Credential.SecretExpiresOn -le [System.DateTimeOffset]::UtcNow)) {
-        Stop-PDGraphError -Message 'The application secret on file has expired; rotate it before uploading.' -Stage 'Credential'
+    # Compared as a time: a candidate from New-PDGraphCredentialObject holds the ISO string, and a
+    # string comparison against a DateTimeOffset is never true. A value that cannot be read as a
+    # time is refused rather than ignored.
+    if ($Credential.SecretExpiresOn) {
+        $expiresAt = ConvertTo-PDGraphExpiryTime -Value $Credential.SecretExpiresOn
+        if ($null -eq $expiresAt) {
+            Stop-PDGraphError -Message 'The credential expiry cannot be read as a date and time, so no token was requested; re-enter the credential.' -Stage 'Credential'
+        }
+        if ($expiresAt -le [System.DateTimeOffset]::UtcNow) {
+            Stop-PDGraphError -Message 'The application secret on file has expired; rotate it before uploading.' -Stage 'Credential'
+        }
     }
 
     $tenantId = ([string]$Credential.TenantId).Trim()
@@ -5315,11 +5327,18 @@ function Remove-PDAppSecret {
                     -Description ("revoke the {0}" -f $what) -Body @{ keyId = $keyText }
     } catch {
         $info = Get-PDGraphErrorInfo -ErrorRecord $_
+        # Detail is the short reason only (HTTP status and the service's own error text), for callers
+        # that phrase their own sentence; RequestId is kept apart for a support line.
         if ([int]$info.Status -eq 0) {
-            return @{ Success = $false; Outcome = 'Unknown'; Revoked = $false; KeyId = $keyText
+            return @{ Success = $false; Outcome = 'Unknown'; Revoked = $false; KeyId = $keyText; RequestId = $null
+                      Detail = 'no response came back and the request was not repeated, so it may still be there'
                       Message = ("The revoke request for the {0} (key id {1}) did not come back and was not repeated, so the secret may still be active. Check the application secrets in Entra. ({2})" -f $what, $keyText, [string]$info.Message) }
         }
-        return @{ Success = $false; Outcome = 'Failed'; Revoked = $false; KeyId = $keyText
+        $short = ("HTTP {0}" -f [int]$info.Status)
+        $serviceText = Get-PDGraphTrimmedText -Value ([string]$info.Detail)
+        if (-not [string]::IsNullOrWhiteSpace($serviceText)) { $short = ("{0}: {1}" -f $short, $serviceText) }
+        return @{ Success = $false; Outcome = 'Failed'; Revoked = $false; KeyId = $keyText; RequestId = (Get-PDGraphTrimmedText -Value ([string]$info.RequestId))
+                  Detail = $short
                   Message = ("The {0} (key id {1}) could not be revoked and is still active: {2}" -f $what, $keyText, [string]$info.Message) }
     }
 
@@ -5857,12 +5876,19 @@ function Start-PDGraphSecretRotation {
         2. Add the replacement secret while the old credential and old key are still in place.
         3. Test the replacement, with bounded propagation retries.
         4. Save it and read it back.
-        5. Only then remove the OLD secret, by its recorded key id.
+        5. Only then remove the OLD secret, by its recorded key id. With no recorded key id
+           (normally a Manual entry whose Secret ID was skipped) nothing is revoked: it is never
+           looked up by name, label or anything else, and it is reported for manual deletion.
 
         If the test or the save fails, the old local credential is still there and untouched, and
         the just-created key is revoked - but only when its exact id is known, otherwise the id is
         reported for cleanup. If removing the old key fails, the new credential is kept and working
-        and the old key is reported as still active. Nothing is ever revoked by display name.
+        and the old key is reported as still active. Once the new credential is saved, nothing about
+        the old key turns the rotation into a failure. Nothing is ever revoked by display name.
+
+        After a successful rotation, OldKeyOutcome is one of Deleted / DeleteFailed / NoSecretId /
+        Kept, and OldKeyMessage is the one sentence for the operator about the previous secret.
+        Message is about the new secret only, so the two are never repeated.
     #>
     param(
         [AllowNull()][string]$CredentialPath,
@@ -5888,6 +5914,9 @@ function Start-PDGraphSecretRotation {
         OldKeyRemoved          = $false
         OldKeyId               = $null
         LeftoverKeyId          = $null
+        OldKeyOutcome          = $null   # after success: Deleted, DeleteFailed, NoSecretId or Kept
+        OldKeyMessage          = $null   # the one operator sentence about the previous secret
+        OldKeyRequestId        = $null   # DeleteFailed only: Graph's request id, for a support line
         Warnings               = @()
         Message                = $null
     }
@@ -5919,9 +5948,12 @@ function Start-PDGraphSecretRotation {
 
     $answer.OldKeyId = [string]$old.SecretKeyId
 
-    $expired = ($old.SecretExpiresOn -le [System.DateTimeOffset]::UtcNow)
-    if ($expired) {
-        $answer.Warnings += ("The stored secret expired at {0}; rotation can still replace it." -f (Format-PDGraphExpiry -ExpiresOn $old.SecretExpiresOn))
+    # Only useful when the rotation fails (the old secret then does NOT keep uploads working); it
+    # is taken out again on success, where OldKeyMessage is the one line about the old secret.
+    $expiredNote = $null
+    if ($old.SecretExpiresOn -le [System.DateTimeOffset]::UtcNow) {
+        $expiredNote = ("The stored secret expired at {0}, so until a rotation succeeds there is no working credential on this PC." -f (Format-PDGraphExpiry -ExpiresOn $old.SecretExpiresOn))
+        $answer.Warnings += $expiredNote
     }
 
     $sessionTenant = [string](Get-PDGraphPropertyValue -Object $Session -Name 'TenantId')
@@ -5958,7 +5990,7 @@ function Start-PDGraphSecretRotation {
     if ($DryRun) {
         $answer.Success        = $true
         $answer.Reason         = 'DryRun'
-        $answer.Message        = ("A dry run: it would add a new secret to '{0}' ({1}), test it, save it, and then revoke the old secret {2}. Nothing was created, saved, or revoked." -f $looked.App.DisplayName, $applicationId, $(if ([string]::IsNullOrWhiteSpace($old.SecretKeyId)) { '(none recorded - it would be reported for manual cleanup)' } else { ([guid]$old.SecretKeyId).ToString() }))
+        $answer.Message        = ("A dry run: it would add a new secret to '{0}' ({1}), test it, save it, and then revoke the old secret {2}. Nothing was created, saved, or revoked." -f $looked.App.DisplayName, $applicationId, $(if ([string]::IsNullOrWhiteSpace($old.SecretKeyId)) { '(none recorded - it would not be revoked, and would be reported for manual deletion)' } else { ([guid]$old.SecretKeyId).ToString() }))
         $answer.LeftoverKeyId  = $null
         return $answer
     }
@@ -6027,27 +6059,60 @@ function Start-PDGraphSecretRotation {
     $answer.SavedTo           = [string]$saved.Path
     $answer.NewDaysUntilExpiry = $saved.DaysUntilExpiry
     #$answer.Warnings += 'The Multi-Admin Approval exclusion belongs to the application, so it still covers this workstation after the rotation.'
+    if ($null -ne $expiredNote) { $answer.Warnings = @($answer.Warnings | Where-Object { $_ -ne $expiredNote }) }
 
     # --- 5. only now revoke the old key, by exact id ---------------------------------------
+    # Message speaks about the new secret only; OldKeyMessage is the one sentence about the old one.
+    $newExpiry = Format-PDGraphExpiry -ExpiresOn $created.ExpiresOn
+    $oldKeyId  = Get-PDGraphTrimmedText -Value ([string]$old.SecretKeyId)
+
+    $appName = Get-PDGraphTrimmedText -Value ([string]$looked.App.DisplayName)
+    if ([string]::IsNullOrWhiteSpace($appName)) { $appName = [string]$script:PDGraph.AppDisplayName }
+    $portalPath = ("the Entra admin center > App registrations > {0} > Certificates & secrets" -f $appName)
+
+    $answer.Message = ("Rotation finished. The new secret (key id {0}) works and is saved, expiring {1}." -f [string]$created.KeyId, $newExpiry)
+
     if ($SkipOldKeyRevocation) {
-        $answer.Reason = 'RotatedOldKeyKept'
-        $answer.Warnings += 'You asked to keep the old secret, so it is still active and will need revoking in Entra when you are sure this workstation is using the new one.'
-        $answer.Message = ("Rotation finished. The new secret (key id {0}) is saved and works, expiring {2}; the old secret {1} was left active as requested." -f [string]$created.KeyId, $(if ([string]::IsNullOrWhiteSpace($old.SecretKeyId)) { '(no key id recorded)' } else { ([guid]$old.SecretKeyId).ToString() }), (Format-PDGraphExpiry -ExpiresOn $created.ExpiresOn))
+        $answer.Reason        = 'RotatedOldKeyKept'
+        $answer.OldKeyOutcome = 'Kept'
+        $answer.LeftoverKeyId = $(if ([string]::IsNullOrWhiteSpace($oldKeyId)) { 'unknown' } else { ([guid]$oldKeyId).ToString() })
+        $answer.OldKeyMessage = ("The previous client secret{0} was kept as requested. Delete it in {1} when you are sure this PC uses the new one." -f $(if ([string]::IsNullOrWhiteSpace($oldKeyId)) { '' } else { (" (Secret ID {0})" -f ([guid]$oldKeyId).ToString()) }), $portalPath)
         return $answer
     }
 
-    $revoked = Remove-PDAppSecret -ApplicationId $applicationId -KeyId $old.SecretKeyId -Description 'previous secret' -Stage $Stage
+    # No recorded key id: nothing is revoked, and nothing is looked up to guess which one it was.
+    # Setup cannot know why the id is missing; the usual reason is a Manual entry whose Secret ID
+    # was skipped, so the message says that it ASSUMES so.
+    if ([string]::IsNullOrWhiteSpace($oldKeyId)) {
+        $answer.Reason        = 'RotatedOldKeyNotRecorded'
+        $answer.OldKeyOutcome = 'NoSecretId'
+        $answer.LeftoverKeyId = 'unknown'
+        $answer.OldKeyMessage = ("No Secret ID was found for the previous client secret, so Setup assumes it was entered by hand through the Manual option. It was NOT deleted. If no other PC uses it, delete it in {0}." -f $portalPath)
+        return $answer
+    }
+
+    $oldKeyText = ([guid]$oldKeyId).ToString()
+    $answer.OldKeyId = $oldKeyText
+
+    $revoked = Remove-PDAppSecret -ApplicationId $applicationId -KeyId $oldKeyText -Description 'previous secret' -Stage $Stage
     if ($revoked.Success) {
         $answer.OldKeyRemoved = $true
-        $answer.Message = ("Rotation finished. The new secret (key id {0}) works and is saved, expiring {1}; the old secret {2} was revoked." -f [string]$created.KeyId, (Format-PDGraphExpiry -ExpiresOn $created.ExpiresOn), ([guid]$old.SecretKeyId).ToString())
+        $answer.OldKeyOutcome = 'Deleted'
+        $answer.OldKeyMessage = ("The previous client secret (Secret ID {0}, expiring {1}) was deleted from Entra." -f $oldKeyText, (Format-PDGraphExpiry -ExpiresOn $old.SecretExpiresOn))
         return $answer
     }
 
     # Spec 7.4: the new credential stays, and the still-active old key is reported, not hidden.
+    # The sentence carries the short reason only; the request id goes to OldKeyRequestId, which
+    # Setup logs separately for support.
+    $reason = Get-PDGraphTrimmedText -Value ([string]$revoked.Detail)
+    if ([string]::IsNullOrWhiteSpace($reason)) { $reason = 'no reason was reported' }
+
     $answer.Reason          = 'RotatedOldKeyActive'
-    $answer.LeftoverKeyId   = $revoked.KeyId
-    $answer.Warnings       += [string]$revoked.Message
-    $answer.Message = ("Rotation finished: this workstation now uses the new secret (key id {0}), which was saved and tested and expires {2}. {1}" -f [string]$created.KeyId, [string]$revoked.Message, (Format-PDGraphExpiry -ExpiresOn $created.ExpiresOn))
+    $answer.OldKeyOutcome   = 'DeleteFailed'
+    $answer.LeftoverKeyId   = $oldKeyText
+    $answer.OldKeyRequestId = Get-PDGraphTrimmedText -Value ([string]$revoked.RequestId)
+    $answer.OldKeyMessage   = ("The previous client secret (Secret ID {0}) could not be deleted from Entra ({1}). Delete it in {2}." -f $oldKeyText, $reason.TrimEnd('.'), $portalPath)
     return $answer
 }
 
@@ -6437,7 +6502,7 @@ function Test-PDGraphUploadCandidateCredential {
     }
 
     if ([string]::IsNullOrWhiteSpace([string]$credential.SecretKeyId)) {
-        $warnings += 'No secret key id was entered, so rotation will save a replacement but cannot revoke this secret; it will report the key for manual cleanup.'
+        $warnings += 'No secret key id (Secret ID) was entered, so when this secret is renewed Setup cannot delete it from Entra; you delete it there yourself.'
     }
 
     $token = $null
@@ -6465,7 +6530,7 @@ function Test-PDGraphUploadCandidateCredential {
 
     if (@($missing).Count -gt 0) {
         return @{ Valid = $false; Reason = 'MissingRoles'; Credential = $credential; Roles = @($held); MissingRoles = @($missing); Warnings = $warnings
-                  Message = ("Those credentials work but the application is not granted {0}. Grant the missing application role(s) in Entra ('Azure App Registration - Setup/Config', Automatic, does it), then save again. Nothing was replaced." -f (($missing | ForEach-Object { "'$_'" }) -join ', ')) }
+                  Message = ("Those credentials work but the application is not granted {0}. Run InTuneAPI--Setup-and-Manage > Azure App Registration - Setup/Config > Automatic. It needs an Entra admin sign-in, grants only the missing permission(s), and also creates and saves a new client secret for this PC (replacing these hand-entered ones). Nothing was replaced." -f (($missing | ForEach-Object { "'$_'" }) -join ', ')) }
     }
 
     if (@($held).Count -eq 0) {
@@ -6528,7 +6593,7 @@ function Test-PDGraphUploadConnection {
 
     if (@($missing).Count -gt 0) {
         return @{ Success = $false; Reason = 'MissingRoles'
-                  Message = ("The secret works but the application is not granted {0}. Run the create/configure option to grant them." -f (($missing | ForEach-Object { "'$_'" }) -join ', '))
+                  Message = ("The secret works but the application is not granted {0}. Run InTuneAPI--Setup-and-Manage > Azure App Registration - Setup/Config > Automatic. It needs an Entra admin sign-in, grants only the missing permission(s), and also creates and saves a new client secret for this PC." -f (($missing | ForEach-Object { "'$_'" }) -join ', '))
                   Roles = @($held); MissingRoles = @($missing)
                   SecretExpiresOn = $credential.SecretExpiresOn; DaysUntilExpiry = $credential.DaysUntilExpiry
                   Warnings = $warnings }

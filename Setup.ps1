@@ -5311,7 +5311,10 @@ Function Connect-GraphUploadAdminSession {
 
     param(
         [switch]$IncludeConsent,
-        [string]$Purpose = 'make this change'
+        [string]$Purpose = 'make this change',
+        # Known already (the stored credential's tenant, when renewing before an upload): used as
+        # it is instead of asking. Anything that is not a GUID is ignored and the question is asked.
+        [AllowNull()][string]$TenantId
     )
 
     # The upload identity is never allowed to manage applications (spec 7.1), so anything here that
@@ -5319,10 +5322,19 @@ Function Connect-GraphUploadAdminSession {
     # prompts; the library owns the connection and its verification.
     if (-not (Confirm-GraphUploadAdminModule)) { return $null }
 
-    $TenantId = Read-GraphUploadTenantId
-    if ($null -eq $TenantId) {
-        Write-Log "Cancelled; no sign-in was attempted." 'WARNING'
-        return $null
+    # A separate variable: the [string] parameter would turn Read-GraphUploadTenantId's $null
+    # ("cancelled") into '' ("use the account's tenant").
+    $SignInTenant = $null
+    $KnownTenant  = [guid]::Empty
+    if ((-not [string]::IsNullOrWhiteSpace($TenantId)) -and [guid]::TryParse($TenantId.Trim(), [ref]$KnownTenant)) {
+        $SignInTenant = $KnownTenant.ToString()
+        Write-Log "Signing in to tenant $SignInTenant (the tenant of the stored credential)." 'INFO2'
+    } else {
+        $SignInTenant = Read-GraphUploadTenantId
+        if ($null -eq $SignInTenant) {
+            Write-Log "Cancelled; no sign-in was attempted." 'WARNING'
+            return $null
+        }
     }
 
     Write-Log ""
@@ -5339,7 +5351,7 @@ Function Connect-GraphUploadAdminSession {
     Write-Log "Leave 'Consent on behalf of your organization' unchecked." 'WARNING'
     Write-Log ""
 
-    $Connect = Connect-PDGraphInteractive -TenantId $TenantId -IncludeConsent:$IncludeConsent
+    $Connect = Connect-PDGraphInteractive -TenantId $SignInTenant -IncludeConsent:$IncludeConsent
 
     if ($Connect.Reason -eq 'ExistingContext') {
 
@@ -5351,9 +5363,9 @@ Function Connect-GraphUploadAdminSession {
         $Answer = ([string](Read-Host "r/s")).Trim().ToLowerInvariant()
 
         if ($Answer -eq 'r') {
-            $Connect = Connect-PDGraphInteractive -TenantId $TenantId -ReuseExistingContext
+            $Connect = Connect-PDGraphInteractive -TenantId $SignInTenant -ReuseExistingContext
         } elseif ($Answer -eq 's') {
-            $Connect = Connect-PDGraphInteractive -TenantId $TenantId -IncludeConsent:$IncludeConsent -ReplaceExistingContext
+            $Connect = Connect-PDGraphInteractive -TenantId $SignInTenant -IncludeConsent:$IncludeConsent -ReplaceExistingContext
         } else {
             Write-Log "Cancelled; the existing sign-in was left as it was." 'WARNING'
             return $null
@@ -5406,7 +5418,7 @@ Function Show-GraphUploadCredentialState {
 
     if ($summary.Usable) {
         Write-Log ("     Secret expires: {0} ({1} left)" -f (Format-PDGraphExpiry -ExpiresOn $summary.SecretExpiresOn), (Format-PDGraphTimeRemaining -ExpiresOn $summary.SecretExpiresOn)) 'INFO2'
-        Write-Log ("     Secret key id:  {0}" -f $(if ([string]::IsNullOrWhiteSpace($summary.SecretKeyId)) { 'not recorded (rotation will report the old key for manual cleanup)' } else { [string]$summary.SecretKeyId })) 'INFO2'
+        Write-Log ("     Secret key id:  {0}" -f $(if ([string]::IsNullOrWhiteSpace($summary.SecretKeyId)) { 'not recorded (at rotation the old secret is not deleted from Entra; you delete it there yourself)' } else { [string]$summary.SecretKeyId })) 'INFO2'
     } else {
         Write-Log "     The file exists but is not usable: $($summary.Message)" 'ERROR'
     }
@@ -5552,8 +5564,8 @@ Function Invoke-GraphUploadEnterCredential {
 
     # Spec 7.2 "Manual entry": TenantId, ClientId, expiry and secret (Read-Host -AsSecureString),
     # tested against the tenant BEFORE the local configuration is replaced. AppObjectId and
-    # SecretKeyId may be absent and are never invented; without a key id, rotation reports the old
-    # secret for manual revocation instead of guessing at it.
+    # SecretKeyId (Entra's "Secret ID") may be absent and are never invented; without a key id,
+    # rotation does not delete the old secret from Entra and says so - it never guesses at it.
 
     Write-Log ""
     Write-Log "-------------------------------------------------------------------------------------------"
@@ -5621,18 +5633,19 @@ Function Invoke-GraphUploadEnterCredential {
     }
 
     Write-Log ""
-    Write-Log "The secret's key ID lets rotation revoke THIS secret once a new one works. Leave it blank if you do not"
-    Write-Log "know it: the credential still works, and rotation will report the old key for you to revoke by hand." 'WARNING'
+    Write-Log "If you give this client secret's Secret ID, Setup can delete it from Entra automatically when it is next renewed. Entra"
+    Write-Log "shows it in the app registration > Certificates & secrets > Client secrets, in the 'Secret ID' column (a GUID - not the Value)." 'WARNING'
+    Write-Log "     Press Enter to skip: the credential still works, but when it is renewed you delete this client secret from Entra by hand." 'INFO2'
 
     $SecretKeyId = ''
-    $KeyAnswer   = ([string](Read-Host "Secret key ID (GUID, or Enter for unknown)")).Trim()
+    $KeyAnswer   = ([string](Read-Host "Secret ID (GUID, or Enter to skip)")).Trim()
 
     if (-not [string]::IsNullOrWhiteSpace($KeyAnswer)) {
         $ParsedKey = [guid]::Empty
         if ([guid]::TryParse($KeyAnswer, [ref]$ParsedKey)) {
             $SecretKeyId = $ParsedKey.ToString()
         } else {
-            Write-Log "That is not a GUID, so it was left out. The credential will work; rotation will report the old key for manual cleanup." 'WARNING'
+            Write-Log "That is not a GUID, so it was left out. The credential will work; when it is renewed you delete this client secret from Entra by hand." 'WARNING'
             $SecretKeyId = ''
         }
     }
@@ -5738,9 +5751,11 @@ Function Invoke-GraphUploadTestConnection {
 Function Invoke-GraphUploadRotateSecret {
 
     # Spec 7.4, in order: add the replacement while the old one still works, test it, save it, and
-    # only then revoke the OLD secret by its recorded key id. If the test or the save fails the old
-    # credential is still in place; if only the revocation fails, the new secret stays working and the
-    # surviving old key is reported. Nothing is ever revoked by display name.
+    # only then revoke the OLD secret by its recorded key id. With no recorded key id nothing is
+    # revoked, and Setup says it assumes a hand-entered secret (Manual option) and leaves it for you
+    # to delete. After a successful rotation exactly one line reports the old secret (deleted /
+    # could not be deleted / no Secret ID). If the test or the save fails the old credential is still
+    # in place. Nothing is ever revoked by display name.
     #
     # -LifetimeDays skips the lifetime question (Confirm-GraphUploadSecretFresh renews with the
     # default lifetime right before an upload). Returns $true only when the new secret was saved and
@@ -5756,21 +5771,57 @@ Function Invoke-GraphUploadRotateSecret {
 
     if (-not (Confirm-GraphUploadAdminModule -Purpose "rotating this PC's secret")) { return $false }
 
-    $Summary = Show-GraphUploadCredentialState
-
-    if (-not $Summary.Stored) {
-        Write-Log "There is nothing to rotate yet. Use Azure App Registration - Setup/Config first." 'WARNING'
-        return $false
-    }
+    $StoredTenant = $null
 
     if ($LifetimeDays -le 0) {
+
+        # The menu's Rotate option: show what is stored, ask for the lifetime and the tenant.
+        $Summary = Show-GraphUploadCredentialState
+
+        if (-not $Summary.Stored) {
+            Write-Log "There is nothing to rotate yet. Use Azure App Registration - Setup/Config first." 'WARNING'
+            return $false
+        }
+
         $LifetimeDays = Read-GraphUploadSecretLifetime -Default ([int]$PDGraph.DefaultSecretLifetimeDays)
+
     } else {
-        Write-Log ""
-        Write-Log "The new secret will last $LifetimeDays day(s) ($($LifetimeDays * 24) hours)." 'INFO2'
+
+        # Renewing right before an upload: an expired secret is the expected case here, not an
+        # error, so it gets one plain line; and the tenant is the stored credential's own.
+        try {
+            $Stored = Get-PDGraphCredentialMetadata
+        } Catch {
+            Show-GraphUploadError $_
+            return $false
+        }
+
+        $State = 'expires'
+        if ((Get-PDGraphSecretRenewalNeed -ExpiresOn $Stored.SecretExpiresOn) -eq 'Expired') { $State = 'expired' }
+
+        Write-Log ("Renewing this PC's client secret ({0} at {1}). The new one will last {2} day(s) ({3} hours)." -f $State, (Format-PDGraphExpiry -ExpiresOn $Stored.SecretExpiresOn), $LifetimeDays, ($LifetimeDays * 24)) 'INFO2'
+        $StoredTenant = [string]$Stored.TenantId
+
     }
 
-    $Session = Connect-GraphUploadAdminSession -Purpose 'add a new secret for this PC and remove the old one'
+    # Say "remove the old one" only when it can be: without a recorded Secret ID it is not deleted,
+    # and the single line after the rotation says so. Expired matters only if the rotation fails.
+    $OldHasId   = $false
+    $OldExpired = $false
+    try {
+        $Known      = Get-PDGraphCredentialMetadata
+        $OldHasId   = -not [string]::IsNullOrWhiteSpace([string]$Known.SecretKeyId)
+        $OldExpired = ((Get-PDGraphSecretRenewalNeed -ExpiresOn $Known.SecretExpiresOn) -eq 'Expired')
+    } Catch { }
+
+    $Purpose  = 'add a new secret for this PC'
+    $Progress = 'Adding a new secret for this PC and testing it.'
+    if ($OldHasId) {
+        $Purpose  = 'add a new secret for this PC and remove the old one'
+        $Progress = 'Adding a new secret for this PC, testing it, then removing the old one.'
+    }
+
+    $Session = Connect-GraphUploadAdminSession -Purpose $Purpose -TenantId $StoredTenant
     if ($null -eq $Session) { return $false }
 
     $Rotated = $false
@@ -5778,7 +5829,7 @@ Function Invoke-GraphUploadRotateSecret {
     try {
 
         Write-Log ""
-        Write-Log "Adding a new secret for this PC, testing it, then removing the old one. A brand-new secret can take a few minutes to start working; Setup waits for it (up to 5 minutes)..." 'INFO2'
+        Write-Log "$Progress A brand-new secret can take a few minutes to start working; Setup waits for it (up to 5 minutes)..." 'INFO2'
 
         $Result = Start-PDGraphSecretRotation -Session $Session -SecretLifetimeDays $LifetimeDays
 
@@ -5789,11 +5840,25 @@ Function Invoke-GraphUploadRotateSecret {
             $Rotated = $true
         } else {
             Write-Log $Result.Message 'ERROR'
-            Write-Log "Your previous credential is still in place, so uploads keep working as they did before." 'WARNING'
+            # An expired one keeps nothing working; the library's warning below says so instead.
+            if (-not $OldExpired) {
+                Write-Log "Your previous credential is still in place, so uploads keep working as they did before." 'WARNING'
+            }
         }
 
         foreach ($Warning in @($Result.Warnings)) {
             if (-not [string]::IsNullOrWhiteSpace($Warning)) { Write-Log "     $Warning" 'WARNING' }
+        }
+
+        # Exactly one line about the previous secret after every successful rotation: deleted,
+        # could not be deleted, or no Secret ID recorded (assumed hand-entered, left in Entra).
+        if ($Rotated -and -not [string]::IsNullOrWhiteSpace([string]$Result.OldKeyMessage)) {
+            $OldLevel = 'WARNING'
+            if (([string]$Result.OldKeyOutcome) -eq 'Deleted') { $OldLevel = 'SUCCESS' }
+            Write-Log $Result.OldKeyMessage $OldLevel
+            if (-not [string]::IsNullOrWhiteSpace([string]$Result.OldKeyRequestId)) {
+                Write-Log ("     For support: Microsoft Graph request id {0}" -f [string]$Result.OldKeyRequestId) 'INFO2'
+            }
         }
 
     } Catch {
@@ -5820,9 +5885,11 @@ Function Confirm-GraphUploadSecretFresh {
     # offers to sign in and replace it now, with the default lifetime and no lifetime question.
     #
     # Returns $true when the caller should carry on exactly as before: the secret has more than
-    # RenewOfferHours left, it was just renewed, or there is nothing usable to judge (no file, or a
-    # file the caller's own credential check will report). Returns $false when renewal was needed
-    # but declined or did not succeed; the caller then takes its "no usable credential" path.
+    # RenewOfferHours left, it was just renewed, the operator declined renewing a secret that has
+    # not expired yet (the upload then uses it as it is), or there is nothing usable to judge (no
+    # file, or a file the caller's own credential check will report). Returns $false when an
+    # EXPIRED secret was not renewed (declined), or when renewal was attempted and did not succeed;
+    # the caller then takes its "no usable credential" path.
     # The expiry is read without the expiry rule (Get-PDGraphCredential refuses an expired secret,
     # which is exactly the case to handle here); the secret itself is never read or shown.
 
@@ -5848,9 +5915,13 @@ Function Confirm-GraphUploadSecretFresh {
     }
 
     $Renew = Read-GraphUploadYesNo -Question ("Sign in now and create a new {0}-hour client secret?" -f ($LifetimeDays * 24)) -Default $true `
-                -Note "An administrator sign-in adds the new secret, tests it, saves it for your Windows account, and then removes the old one."
+                -Note "An administrator sign-in adds the new secret, tests it and saves it for your Windows account. The previous secret is then deleted from Entra by its recorded Secret ID; if none is recorded, Setup assumes it was entered by hand and leaves it for you to delete."
 
     if (-not $Renew) {
+        if ($Need -eq 'Soon') {
+            Write-Log ("No new secret was created. Continuing with the current secret, which has {0} left." -f (Format-PDGraphTimeRemaining -ExpiresOn $Stored.SecretExpiresOn)) 'WARNING'
+            return $true
+        }
         Write-Log "No new secret was created." 'WARNING'
         return $false
     }
