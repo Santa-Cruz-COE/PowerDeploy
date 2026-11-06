@@ -54,7 +54,13 @@ $featureFiles = @(
     'Other_Tools\Printer-Intune_Helpers.ps1',
     'Other_Tools\Printer-IntuneBulk.ps1',
     'Other_Tools\CsvGrid-Editor_Helpers.ps1',
-    'Tests\PrinterIntuneBulk.Tests.ps1'
+    'Tests\PrinterIntuneBulk.Tests.ps1',
+    # Org registry Intune Platform Script (Part 2). The generated copy is UTF-8 with BOM on purpose
+    # (a stamped value may be non-ASCII); the template it is stamped from must stay ASCII.
+    'Templates\OrgRegistry-PlatformScript_TEMPLATE.ps1',
+    'Other_Tools\OrgRegistry-Intune_Helpers.ps1',
+    'Other_Tools\Generate_Install-Command.ps1',
+    'Tests\OrgRegistryPlatformScript.Tests.ps1'
 )
 
 # Joined by M7 (duplicate-printer guard); until then its pre-existing bytes warn instead of failing.

@@ -260,10 +260,12 @@ Write-Log ""
 ### Organization registry values (shared by Intune and local setup) ###
 #####################################################################
 # The one place the org registry layout and its defaults are defined on the writer side.
-# Returns the bracketed RegistryChanges string that General_RemediationScript-Registry_TEMPLATE.ps1
-# parses. RegRemediationScript wraps it for Intune; Setup.ps1's OrganizationRegistryEntries--Local-Setup
-# passes it straight to the remediation template to write this PC's registry.
-Function OrgRegistryChangesString {
+# Returns the seven entries in order, each { KeyPath; ValueName; ValueType; Value }. Value is always a
+# string ("$x", so an omitted or $null value is ""). Used by:
+#   - OrgRegistryChangesString   (the bracketed string for the Intune Remediation and local setup)
+#   - OrgRegistryPlatformScript  (the self-contained Intune Platform Script)
+# Logs nothing: callers decide what is shown, and the platform script path never shows values.
+Function OrgRegistryEntryList {
 
     Param(
 
@@ -280,20 +282,60 @@ Function OrgRegistryChangesString {
 
     )
 
+    # Make as many as you need (keep this order: the bracketed string is built in this order)
+    return @(
+        [pscustomobject]@{ KeyPath = "HKEY_LOCAL_MACHINE\SOFTWARE\PowerDeploy\General";      ValueName = "StorageAccountName";         ValueType = "String"; Value = "$StorageAccountName" }
+        [pscustomobject]@{ KeyPath = "HKEY_LOCAL_MACHINE\SOFTWARE\PowerDeploy\General";      ValueName = "CustomRepoURL";              ValueType = "String"; Value = "$CustomRepoURL" }
+        [pscustomobject]@{ KeyPath = "HKEY_LOCAL_MACHINE\SOFTWARE\PowerDeploy\General";      ValueName = "CustomRepoToken";            ValueType = "String"; Value = "$CustomRepoToken" }
+        [pscustomobject]@{ KeyPath = "HKEY_LOCAL_MACHINE\SOFTWARE\PowerDeploy\Printers";     ValueName = "PrinterDataJSONpath";        ValueType = "String"; Value = "$PrinterDataJSONpath" }
+        [pscustomobject]@{ KeyPath = "HKEY_LOCAL_MACHINE\SOFTWARE\PowerDeploy\Printers";     ValueName = "PrinterContainerSASkey";     ValueType = "String"; Value = "$PrinterContainerSASkey" }
+        [pscustomobject]@{ KeyPath = "HKEY_LOCAL_MACHINE\SOFTWARE\PowerDeploy\Applications"; ValueName = "ApplicationDataJSONpath";    ValueType = "String"; Value = "$ApplicationDataJSONpath" }
+        [pscustomobject]@{ KeyPath = "HKEY_LOCAL_MACHINE\SOFTWARE\PowerDeploy\Applications"; ValueName = "ApplicationContainerSASkey"; ValueType = "String"; Value = "$ApplicationContainerSASkey" }
+    )
+}
+
+# Returns the bracketed RegistryChanges string that General_RemediationScript-Registry_TEMPLATE.ps1
+# parses. RegRemediationScript wraps it for Intune; Setup.ps1's OrganizationRegistryEntries--Local-Setup
+# passes it straight to the remediation template to write this PC's registry.
+# Layout and defaults come from OrgRegistryEntryList; the string and the log lines are the same as
+# before that function existed.
+Function OrgRegistryChangesString {
+
+    # Same parameters as OrgRegistryEntryList; the defaults live there only.
+    Param(
+
+        $StorageAccountName,
+
+        $PrinterDataJSONpath,
+        $PrinterContainerSASkey,
+
+        $ApplicationDataJSONpath,
+        $ApplicationContainerSASkey,
+
+        $CustomRepoURL,
+        $CustomRepoToken
+
+    )
+
     Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START" -ForegroundColor Yellow
     Write-Log ""
+
+    $Entries = @(OrgRegistryEntryList @PSBoundParameters)
+    $EntryValue = @{}
+    foreach ($Entry in $Entries) { $EntryValue[$Entry.ValueName] = $Entry.Value }
+
     # Display all the supplied parameters for the function:
     Write-Log "Function parameters received:"
         Write-Log ""
 
     # Check the returned hashtable
-    Write-Log "StorageAccountName:         $StorageAccountName"
-    Write-Log "PrinterDataJSONpath:        $PrinterDataJSONpath"
-    Write-Log "PrinterContainerSASkey:     $PrinterContainerSASkey"
-    Write-Log "ApplicationDataJSONpath:    $ApplicationDataJSONpath"
-    Write-Log "ApplicationContainerSASkey: $ApplicationContainerSASkey"
-    Write-Log "CustomRepoURL:              $CustomRepoURL"
-    Write-Log "CustomRepoToken:            $CustomRepoToken"
+    Write-Log "StorageAccountName:         $($EntryValue['StorageAccountName'])"
+    Write-Log "PrinterDataJSONpath:        $($EntryValue['PrinterDataJSONpath'])"
+    Write-Log "PrinterContainerSASkey:     $($EntryValue['PrinterContainerSASkey'])"
+    Write-Log "ApplicationDataJSONpath:    $($EntryValue['ApplicationDataJSONpath'])"
+    Write-Log "ApplicationContainerSASkey: $($EntryValue['ApplicationContainerSASkey'])"
+    Write-Log "CustomRepoURL:              $($EntryValue['CustomRepoURL'])"
+    Write-Log "CustomRepoToken:            $($EntryValue['CustomRepoToken'])"
     # End display of parameters
     Write-Log ""
     # Choose the registry changes.
@@ -322,60 +364,15 @@ Function OrgRegistryChangesString {
         $RegistryChangesSTRING += "["+"-KeyPath ""$KeyPath"" -ValueName ""$ValueName"" -ValueType ""$ValueType"" -Value ""$Value"""+"]" # no comma at the end cuz this is the end of the list
         #>
 
-
-        $KeyPath = "HKEY_LOCAL_MACHINE\SOFTWARE\PowerDeploy\General"
-        $ValueName = "StorageAccountName"
-        $ValueType = "String"
-        #$Value = "$(Get-Date -Format 'yyyyMMdd_HHmmss')"
-        $Value = "$StorageAccountName" # Modify this
-        $RegistryChangesSTRING += "["+"-KeyPath ""$KeyPath"" -ValueName ""$ValueName"" -ValueType ""$ValueType"" -Value ""$Value"""+"]"+","
-
-        $KeyPath = "HKEY_LOCAL_MACHINE\SOFTWARE\PowerDeploy\General"
-        $ValueName = "CustomRepoURL"
-        $ValueType = "String"
-        #$Value = "$(Get-Date -Format 'yyyyMMdd_HHmmss')"
-        $Value = "$CustomRepoURL" # Modify this
-        $RegistryChangesSTRING += "["+"-KeyPath ""$KeyPath"" -ValueName ""$ValueName"" -ValueType ""$ValueType"" -Value ""$Value"""+"]"+","
-
-        $KeyPath = "HKEY_LOCAL_MACHINE\SOFTWARE\PowerDeploy\General"
-        $ValueName = "CustomRepoToken"
-        $ValueType = "String"
-        #$Value = "$(Get-Date -Format 'yyyyMMdd_HHmmss')"
-        $Value = "$CustomRepoToken" # Modify this
-        $RegistryChangesSTRING += "["+"-KeyPath ""$KeyPath"" -ValueName ""$ValueName"" -ValueType ""$ValueType"" -Value ""$Value"""+"]"+","
-
-
-        $KeyPath = "HKEY_LOCAL_MACHINE\SOFTWARE\PowerDeploy\Printers"
-        $ValueName = "PrinterDataJSONpath"
-        $ValueType = "String"
-        #$Value = "$(Get-Date -Format 'yyyyMMdd_HHmmss')"
-        $Value = "$PrinterDataJSONpath" # Modify this
-        $RegistryChangesSTRING += "["+"-KeyPath ""$KeyPath"" -ValueName ""$ValueName"" -ValueType ""$ValueType"" -Value ""$Value"""+"]"+","
-
-        $KeyPath = "HKEY_LOCAL_MACHINE\SOFTWARE\PowerDeploy\Printers"
-        $ValueName = "PrinterContainerSASkey"
-        $ValueType = "String"
-        #$Value = "$(Get-Date -Format 'yyyyMMdd_HHmmss')"
-        $Value = "$PrinterContainerSASkey" # Modify this
-        $RegistryChangesSTRING += "["+"-KeyPath ""$KeyPath"" -ValueName ""$ValueName"" -ValueType ""$ValueType"" -Value ""$Value"""+"]"+","
-
-
-        $KeyPath = "HKEY_LOCAL_MACHINE\SOFTWARE\PowerDeploy\Applications"
-        $ValueName = "ApplicationDataJSONpath"
-        $ValueType = "String"
-        #$Value = "$(Get-Date -Format 'yyyyMMdd_HHmmss')"
-        $Value = "$ApplicationDataJSONpath" # Modify this
-        $RegistryChangesSTRING += "["+"-KeyPath ""$KeyPath"" -ValueName ""$ValueName"" -ValueType ""$ValueType"" -Value ""$Value"""+"]"+","
-
-        $KeyPath = "HKEY_LOCAL_MACHINE\SOFTWARE\PowerDeploy\Applications"
-        $ValueName = "ApplicationContainerSASkey"
-        $ValueType = "String"
-        #$Value = "$(Get-Date -Format 'yyyyMMdd_HHmmss')"
-        $Value = "$ApplicationContainerSASkey" # Modify this
-        $RegistryChangesSTRING += "["+"-KeyPath ""$KeyPath"" -ValueName ""$ValueName"" -ValueType ""$ValueType"" -Value ""$Value"""+"]"
-
-
-        # Make as many as you need
+        # One bracketed entry per value, comma-separated (no comma after the last one)
+        $Brackets = foreach ($Entry in $Entries) {
+            $KeyPath   = $Entry.KeyPath
+            $ValueName = $Entry.ValueName
+            $ValueType = $Entry.ValueType
+            $Value     = $Entry.Value
+            "["+"-KeyPath ""$KeyPath"" -ValueName ""$ValueName"" -ValueType ""$ValueType"" -Value ""$Value"""+"]"
+        }
+        $RegistryChangesSTRING = @($Brackets) -join ","
 
     Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END"
     Write-Log ""
@@ -509,6 +506,266 @@ Function RegRemediationScript {
 
 
     $Script:HashPattern = "RegRemediation"
+
+    return "BuildMe"
+}
+###
+
+
+##########################################################################
+### Org registry values as a self-contained Intune Platform Script     ###
+##########################################################################
+# Stamps Templates\OrgRegistry-PlatformScript_TEMPLATE.ps1 with the same seven values the Remediation
+# writes (layout and defaults from OrgRegistryEntryList), so the values exist before PowerDeploy's
+# Win32 apps install during Autopilot (Intune Platform Scripts run before Win32 apps; Remediations
+# do not run during the Enrollment Status Page). The result needs no Git, network or repo files.
+#
+# Values are embedded as single-quoted PowerShell literals (every kind of single quote doubled, via
+# CodeGeneration.EscapeSingleQuotedStringContent), so any character is safe. The script is encoded with
+# a strict UTF-8 encoder (a value that cannot be encoded, such as a lone surrogate, stops generation),
+# and the SAVED file is read back, parsed, and every value compared with what was meant before it is
+# returned; on any mismatch the file is deleted.
+# This function's own lines log only value names and set/blank, never a value. NOTE: the generator's
+# dispatcher (MAIN, "Function Parameters Breakdown") still logs every FunctionParams value, SAS keys and
+# token included, on this path too; that existing logging is deferred to the security audit.
+#
+# Writes TEMP\Custom_Scripts_Output\PowerDeploy-OrgRegistry_<commit>_<yyyyMMdd_HHmmss>.ps1 (UTF-8 with BOM)
+# and returns it to the caller through the same "BuildMe" / $Script:HashPattern pattern as the others.
+Function OrgRegistryPlatformScript {
+
+    # The same seven value parameters as RegRemediationScript (defaults live in OrgRegistryEntryList
+    # only), plus the deploy mode for the stamped header.
+    Param(
+
+        $StorageAccountName,
+
+        $PrinterDataJSONpath,
+        $PrinterContainerSASkey,
+
+        $ApplicationDataJSONpath,
+        $ApplicationContainerSASkey,
+
+        $CustomRepoURL,
+        $CustomRepoToken,
+
+        [string]$DeployMode,
+
+        # TEST ONLY (Tests\OrgRegistryPlatformScript.Tests.ps1). Setup.ps1 never passes these.
+        [string]$RegistryRoot = 'SOFTWARE\PowerDeploy',
+        [string]$OutputDirectory
+
+    )
+
+    Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START" -ForegroundColor Yellow
+    Write-Log ""
+    Write-Log "Generating the Intune Platform Script for the organization registry values..." -ForegroundColor Yellow
+
+    $TemplatePath = "$RepoRoot\Templates\OrgRegistry-PlatformScript_TEMPLATE.ps1"
+    $HelpersPath  = "$RepoRoot\Other_Tools\OrgRegistry-Intune_Helpers.ps1"
+    $MaxBytes     = 200 * 1024   # Intune platform script limit: the file must be smaller than 200 KB
+
+    # The real root, or the test-only root. Anything else could lock down some unrelated key.
+    # Every pattern here ends in \z, not $: .NET's $ also matches before a final newline, so
+    # "SOFTWARE\PowerDeploy`n" would pass a $-anchored check and stamp a sibling key with a line feed
+    # in its name.
+    $RootPattern = '^SOFTWARE\\PowerDeploy(-Test-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})?\z'
+
+    function Stop-PlatformScriptGeneration {
+        param([string]$Reason)
+        Write-Log "SCRIPT: $ThisFileName | FUNCTION: OrgRegistryPlatformScript | END | $Reason" "ERROR"
+        Exit 1
+    }
+
+    # Deploy mode, registry root and working directory go into comments and paths in the generated
+    # script, so only plain characters are allowed (a value can never ride along in them).
+    if ($DeployMode -cnotmatch '^[A-Za-z0-9][A-Za-z0-9-]*\z') { Stop-PlatformScriptGeneration "DeployMode is missing or has unexpected characters." }
+    if ($RegistryRoot -cnotmatch $RootPattern) { Stop-PlatformScriptGeneration "RegistryRoot must be SOFTWARE\PowerDeploy (or the test-only SOFTWARE\PowerDeploy-Test-<guid>)." }
+    if ([string]::IsNullOrWhiteSpace($TargetWorkingDirectory) -or ($TargetWorkingDirectory -cnotmatch '^[A-Za-z]:\\[A-Za-z0-9 ._\\()-]*\z')) { Stop-PlatformScriptGeneration "TargetWorkingDirectory must be a local path such as C:\ProgramData\PowerDeploy--<MODE>." }
+    if (-not (Test-Path -LiteralPath $TemplatePath)) { Stop-PlatformScriptGeneration "Template not found: $TemplatePath" }
+    if (-not (Test-Path -LiteralPath $HelpersPath))  { Stop-PlatformScriptGeneration "Helpers not found: $HelpersPath" }
+
+    # Functions only; defines Get-PDOrgRegistrySourceCommit in this function's scope.
+    . $HelpersPath
+
+    # Same commit string as the app wizard, keyed to this template's uncommitted edits.
+    $SourceCommit = Get-PDOrgRegistrySourceCommit -RepoRoot $RepoRoot
+    $Now = Get-Date
+    $GeneratedAt = $Now.ToString('yyyy-MM-dd HH:mm:ss')
+
+    Write-Log "DeployMode:             $DeployMode"
+    Write-Log "Source commit:          $SourceCommit"
+    Write-Log "Registry root:          HKLM\$RegistryRoot"
+    Write-Log "TargetWorkingDirectory: $TargetWorkingDirectory"
+    Write-Log ""
+
+    # Values: only the seven value parameters go to the layout function, so its defaults apply to the rest.
+    $ValueParams = @{}
+    foreach ($ParamName in @('StorageAccountName', 'PrinterDataJSONpath', 'PrinterContainerSASkey', 'ApplicationDataJSONpath', 'ApplicationContainerSASkey', 'CustomRepoURL', 'CustomRepoToken')) {
+        if ($PSBoundParameters.ContainsKey($ParamName)) { $ValueParams[$ParamName] = $PSBoundParameters[$ParamName] }
+    }
+    $Entries = @(OrgRegistryEntryList @ValueParams)
+
+    # Parse the layout here, at generation time: the device only gets subkey / name / value.
+    $AllowedSubKeys = @('General', 'Printers', 'Applications')
+    $Stamped = @()
+    foreach ($Entry in $Entries) {
+        if ($Entry.ValueType -cne 'String') { Stop-PlatformScriptGeneration "Only String values are supported; $($Entry.ValueName) is $($Entry.ValueType)." }
+        $KeyMatch = [regex]::Match([string]$Entry.KeyPath, '^HKEY_LOCAL_MACHINE\\SOFTWARE\\PowerDeploy\\(?<sub>[A-Za-z]+)\z')
+        if ((-not $KeyMatch.Success) -or ($AllowedSubKeys -cnotcontains $KeyMatch.Groups['sub'].Value)) { Stop-PlatformScriptGeneration "Unexpected key path for $($Entry.ValueName): $($Entry.KeyPath)" }
+        if ([string]$Entry.ValueName -cnotmatch '^[A-Za-z0-9]+\z') { Stop-PlatformScriptGeneration "Unexpected value name: $($Entry.ValueName)" }
+        if (([string]$Entry.Value).IndexOf([char]0) -ge 0) { Stop-PlatformScriptGeneration "$($Entry.ValueName) contains a NUL character, which a registry String value cannot hold." }
+        $Stamped += [pscustomobject]@{ SubKey = $KeyMatch.Groups['sub'].Value; Name = [string]$Entry.ValueName; Value = [string]$Entry.Value }
+    }
+
+    Write-Log "Values to stamp (names only):"
+    foreach ($Entry in $Stamped) {
+        $State = 'set'
+        if ([string]::IsNullOrEmpty($Entry.Value)) { $State = 'blank' }
+        Write-Log "   $($Entry.SubKey)\$($Entry.Name) : $State"
+    }
+    Write-Log ""
+
+    function ConvertTo-PDQuotedLiteral {
+        param([AllowNull()][AllowEmptyString()][string]$Text)
+        return "'" + [System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent([string]$Text) + "'"
+    }
+
+    # Header comment: deploy mode, commit, time only (all checked above). Never a value.
+    $HeaderLines = @(
+        "# PowerDeploy organization registry values - Intune Platform Script (GENERATED; do not edit by hand)"
+        "# Deploy mode   : $DeployMode"
+        "# Source commit : $SourceCommit"
+        "# Generated     : $GeneratedAt"
+        "# Generated by PowerDeploy Setup from Templates\OrgRegistry-PlatformScript_TEMPLATE.ps1"
+        "# Intune: run as SYSTEM (logged on credentials = No), signature check = No, 64-bit host = Yes, device groups."
+    )
+
+    $StampLines = @(
+        '$PDStamped          = $true'
+        ('$PDDeployMode       = ' + (ConvertTo-PDQuotedLiteral $DeployMode))
+        ('$PDSourceCommit     = ' + (ConvertTo-PDQuotedLiteral $SourceCommit))
+        ('$PDRegistryRoot     = ' + (ConvertTo-PDQuotedLiteral $RegistryRoot))
+        ('$PDWorkingDirectory = ' + (ConvertTo-PDQuotedLiteral $TargetWorkingDirectory))
+        '$PDOrgValues        = @('
+    )
+    for ($i = 0; $i -lt $Stamped.Count; $i++) {
+        $Separator = ','
+        if ($i -eq ($Stamped.Count - 1)) { $Separator = '' }
+        $StampLines += ('    [pscustomobject]@{ SubKey = ' + (ConvertTo-PDQuotedLiteral $Stamped[$i].SubKey) + '; Name = ' + (ConvertTo-PDQuotedLiteral $Stamped[$i].Name) + '; Value = ' + (ConvertTo-PDQuotedLiteral $Stamped[$i].Value) + ' }' + $Separator)
+    }
+    $StampLines += ')'
+
+    # Fill the template's two stamp regions (each marker must appear exactly once).
+    $Template = [System.IO.File]::ReadAllText($TemplatePath)
+    $HeaderToken = '#__PD_STAMP_HEADER__'
+    $BeginToken  = '#__PD_STAMP_BEGIN__'
+    $EndToken    = '#__PD_STAMP_END__'
+    foreach ($Token in @($HeaderToken, $BeginToken, $EndToken)) {
+        $Count = ([regex]::Matches($Template, [regex]::Escape($Token))).Count
+        if ($Count -ne 1) { Stop-PlatformScriptGeneration "The template must contain $Token exactly once (found $Count)." }
+    }
+
+    $BeginAt = $Template.IndexOf($BeginToken, [System.StringComparison]::Ordinal) + $BeginToken.Length
+    $EndAt   = $Template.IndexOf($EndToken, [System.StringComparison]::Ordinal)
+    if ($EndAt -le $BeginAt) { Stop-PlatformScriptGeneration "The template's stamp markers are out of order." }
+
+    $NL = "`r`n"
+    $Content = $Template.Substring(0, $BeginAt) + $NL + ($StampLines -join $NL) + $NL + $Template.Substring($EndAt)
+    $Content = $Content.Replace($HeaderToken, ($HeaderLines -join $NL))
+
+    # Checks script text the way the device will read it: it must parse, and every stamped value must
+    # come back exactly. Returns '' when it does, otherwise the reason (names only, never a value).
+    function Test-PDStampedContent {
+        param([AllowEmptyString()][string]$Text)
+
+        $ParseErrors = $null
+        $Ast = [System.Management.Automation.Language.Parser]::ParseInput($Text, [ref]$null, [ref]$ParseErrors)
+        if (@($ParseErrors).Count -gt 0) { return "The generated script does not parse ($(@($ParseErrors).Count) error(s))." }
+
+        $ValuesAssignment = @($Ast.FindAll({ param($Node) ($Node -is [System.Management.Automation.Language.AssignmentStatementAst]) -and ($Node.Left.Extent.Text -ceq '$PDOrgValues') }, $true))
+        if ($ValuesAssignment.Count -ne 1) { return "The generated script must assign the values exactly once." }
+        $Tables = @($ValuesAssignment[0].FindAll({ param($Node) $Node -is [System.Management.Automation.Language.HashtableAst] }, $true))
+        if ($Tables.Count -ne $Stamped.Count) { return "The generated script holds $($Tables.Count) entries instead of $($Stamped.Count)." }
+        for ($i = 0; $i -lt $Stamped.Count; $i++) {
+            $Parsed = @{}
+            foreach ($Pair in $Tables[$i].KeyValuePairs) {
+                $Constant = @($Pair.Item2.FindAll({ param($Node) $Node -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true))
+                if ($Constant.Count -ne 1) { return "Entry $($i + 1) is not a plain string literal." }
+                $Parsed[$Pair.Item1.Value] = $Constant[0].Value
+            }
+            if (($Parsed['SubKey'] -cne $Stamped[$i].SubKey) -or ($Parsed['Name'] -cne $Stamped[$i].Name) -or ($Parsed['Value'] -cne $Stamped[$i].Value)) {
+                return "$($Stamped[$i].SubKey)\$($Stamped[$i].Name) did not survive embedding."
+            }
+        }
+        return ''
+    }
+
+    $Problem = Test-PDStampedContent -Text $Content
+    if ($Problem) { Stop-PlatformScriptGeneration "$Problem Nothing was saved." }
+
+    # UTF-8 with BOM: Windows PowerShell 5.1 reads a BOM-less file as ANSI, which would corrupt a
+    # non-ASCII value. Strict (throwOnInvalidBytes): a value that cannot be encoded, such as a lone
+    # surrogate, stops generation instead of being saved silently as U+FFFD.
+    $Encoding = New-Object System.Text.UTF8Encoding($true, $true)
+    try {
+        $Bytes = [byte[]]($Encoding.GetPreamble() + $Encoding.GetBytes($Content))
+    } catch {
+        Stop-PlatformScriptGeneration "A value cannot be encoded as UTF-8 (for example a lone surrogate character; $($_.Exception.GetType().Name)). Nothing was saved."
+    }
+    if ($Bytes.Length -ge $MaxBytes) { Stop-PlatformScriptGeneration "The generated script is $($Bytes.Length) bytes; Intune platform scripts must be smaller than $MaxBytes bytes. Nothing was saved." }
+
+    if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { $OutputDirectory = "$WorkingDirectory\TEMP\Custom_Scripts_Output" }
+    $SafeCommit = $SourceCommit -replace '[^A-Za-z0-9._-]', '_'
+    $PlatformScriptPath = Join-Path $OutputDirectory ("PowerDeploy-OrgRegistry_{0}_{1}.ps1" -f $SafeCommit, $Now.ToString('yyyyMMdd_HHmmss'))
+
+    try {
+        if (-not (Test-Path -LiteralPath $OutputDirectory)) { New-Item -ItemType Directory -Path $OutputDirectory -Force -ErrorAction Stop | Out-Null }
+        [System.IO.File]::WriteAllBytes($PlatformScriptPath, $Bytes)
+    } catch {
+        if (Test-Path -LiteralPath $PlatformScriptPath) { Remove-Item -LiteralPath $PlatformScriptPath -Force -ErrorAction SilentlyContinue }
+        Stop-PlatformScriptGeneration "Could not save the platform script to $PlatformScriptPath ($($_.Exception.GetType().Name))."
+    }
+
+    # Read the SAVED file back (strict UTF-8, BOM required) and check it again: what Intune will get is
+    # what was checked. Any mismatch deletes the file.
+    $SavedProblem = ''
+    try {
+        $SavedBytes = [System.IO.File]::ReadAllBytes($PlatformScriptPath)
+        $Preamble = $Encoding.GetPreamble()
+        if (($SavedBytes.Length -lt $Preamble.Length) -or ($SavedBytes[0] -ne $Preamble[0]) -or ($SavedBytes[1] -ne $Preamble[1]) -or ($SavedBytes[2] -ne $Preamble[2])) {
+            $SavedProblem = "The saved file has no UTF-8 BOM."
+        } else {
+            $SavedText = $Encoding.GetString($SavedBytes, $Preamble.Length, $SavedBytes.Length - $Preamble.Length)
+            if ($SavedText -cne $Content) { $SavedProblem = "The saved file does not match the generated script." }
+            else { $SavedProblem = Test-PDStampedContent -Text $SavedText }
+        }
+    } catch {
+        $SavedProblem = "The saved file could not be read back ($($_.Exception.GetType().Name))."
+    }
+    if ($SavedProblem) {
+        Remove-Item -LiteralPath $PlatformScriptPath -Force -ErrorAction SilentlyContinue
+        Stop-PlatformScriptGeneration "$SavedProblem The file was deleted."
+    }
+
+    Write-Log "Platform script saved here: $PlatformScriptPath ($($Bytes.Length) bytes)" "SUCCESS"
+    Write-Log ""
+
+    # Store results in script-scoped variables so the main script can package them up
+    $script:GI_PlatformScript             = $PlatformScriptPath
+    $script:GI_PlatformScriptSourceCommit = $SourceCommit
+    $script:GI_PlatformScriptGeneratedAt  = $GeneratedAt
+    $script:GI_PlatformScriptDeployMode   = $DeployMode
+
+    Write-Log "Return values prepared."
+    Write-Log "   PlatformScript             : $script:GI_PlatformScript"
+    Write-Log "   PlatformScriptSourceCommit : $script:GI_PlatformScriptSourceCommit"
+    Write-Log "   PlatformScriptGeneratedAt  : $script:GI_PlatformScriptGeneratedAt"
+    Write-Log "   PlatformScriptDeployMode   : $script:GI_PlatformScriptDeployMode"
+
+    Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END"
+    Write-Log ""
+
+    $Script:HashPattern = "OrgRegistryPlatformScript"
 
     return "BuildMe"
 }
@@ -1303,6 +1560,18 @@ if ($result -eq "BuildMe") {
             DetectScriptCommandTXT = $script:GI_DetectScriptCommandTXT
             RemediationScript = $script:GI_RemediationScript
             RemediationScriptCommandTXT = $script:GI_RemediationScriptCommandTXT
+        }
+
+
+    } elseif ($Script:HashPattern -eq "OrgRegistryPlatformScript"){
+
+        Write-Log "Building return hashtable for OrgRegistryPlatformScript..."
+
+        $result = @{
+            PlatformScript             = $script:GI_PlatformScript
+            PlatformScriptSourceCommit = $script:GI_PlatformScriptSourceCommit
+            PlatformScriptGeneratedAt  = $script:GI_PlatformScriptGeneratedAt
+            PlatformScriptDeployMode   = $script:GI_PlatformScriptDeployMode
         }
 
 

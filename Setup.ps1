@@ -106,6 +106,8 @@ $SvgConverterExePath = "$RepoRoot\Other_Tools\resvg\resvg.exe"
 $SvgConverterExeSha256 = '433A7C744CFF561ED64FCF73C7C04E239D7A07AE5F0AADBF1BA8471D63707402'
 # Path to the shared printer/Intune builders (dot-sourced below: functions only)
 $PrinterIntuneHelpersScriptPath = "$RepoRoot\Other_Tools\Printer-Intune_Helpers.ps1"
+# Path to the shared org registry Intune naming (display names, description, file name) (dot-sourced below: functions only)
+$OrgRegistryIntuneHelpersScriptPath = "$RepoRoot\Other_Tools\OrgRegistry-Intune_Helpers.ps1"
 # Path to the bulk printer tools: bulk create from PrinterData.json, bulk delete (dot-sourced below: functions only)
 $PrinterIntuneBulkScriptPath = "$RepoRoot\Other_Tools\Printer-IntuneBulk.ps1"
 # Path to the built-in sheet editor the bulk tools use when no program opens .csv files (dot-sourced below: functions only)
@@ -204,6 +206,30 @@ try {
     $PrinterIntuneHelpersLoadError = $_.Exception.Message
     Write-Host "WARNING: $PrinterIntuneHelpersLoadError" -ForegroundColor Yellow
     Write-Host "WARNING: The Intune setup wizards for printers and apps will not work until this is fixed." -ForegroundColor Yellow
+
+}
+
+# Shared org registry Intune naming, loaded the same way. OrganizationRegistryEntries--InTune-Setup
+# names the Intune Platform Script and Remediation with these; a load failure is shown straight away
+# and that wizard stops before generating anything.
+$OrgRegistryIntuneHelpersLoadError = $null
+
+try {
+
+    if (-not (Test-Path -LiteralPath $OrgRegistryIntuneHelpersScriptPath)) {
+        throw "The shared org registry Intune naming was not found at $OrgRegistryIntuneHelpersScriptPath"
+    }
+    . $OrgRegistryIntuneHelpersScriptPath
+
+    if (-not (Get-Command -Name 'Get-PDOrgRegistryIntuneDisplayName' -CommandType Function -ErrorAction SilentlyContinue)) {
+        throw "OrgRegistry-Intune_Helpers.ps1 loaded without defining Get-PDOrgRegistryIntuneDisplayName; it may be from a different version."
+    }
+
+} Catch {
+
+    $OrgRegistryIntuneHelpersLoadError = $_.Exception.Message
+    Write-Host "WARNING: $OrgRegistryIntuneHelpersLoadError" -ForegroundColor Yellow
+    Write-Host "WARNING: OrganizationRegistryEntries--InTune-Setup will not work until this is fixed." -ForegroundColor Yellow
 
 }
 
@@ -4780,6 +4806,12 @@ Function Read-OrgRegistryEntryValues {
 # DONE 1/14/26 - Thoroughly tested
 Function OrganizationRegistryEntries--InTune-Setup{
 
+    # The Intune Platform Script and Remediation names come from Other_Tools\OrgRegistry-Intune_Helpers.ps1
+    if ($OrgRegistryIntuneHelpersLoadError) {
+        Write-Log "OrganizationRegistryEntries--InTune-Setup cannot run: $OrgRegistryIntuneHelpersLoadError" "ERROR"
+        return
+    }
+
     # Determine if this is a test or production deployment
     $RepoUrl = Set-URL
     Write-Log "==========================================================================================="
@@ -4836,6 +4868,45 @@ Function OrganizationRegistryEntries--InTune-Setup{
 
         }
 
+    # The same values as a self-contained Intune Platform Script (no Git, no network on the device), so
+    # they are in place before PowerDeploy's Win32 apps install during Autopilot. Intune Remediations do
+    # not run during the Enrollment Status Page; Intune Platform Scripts run before Win32 apps.
+    Write-Log ""
+    Write-Log "Attempting to generate the registry Intune Platform Script..."
+    Write-Log ""
+
+        # Same values as the remediation scripts, plus the deploy mode for the script's header.
+        [hashtable]$PlatformScriptParams = @{} + $FunctionParams
+        $PlatformScriptParams['DeployMode'] = $Global:DeployMode
+
+        $PlatformReturn = @(& $GenerateInstallCommand_ScriptPath `
+        -DesiredFunction "OrgRegistryPlatformScript" `
+        -RepoURL $RepoURL `
+        -RepoNickName $Global:TargetRepoNickName `
+        -RepoBranch $Global:RepoBranch `
+        -TargetWorkingDirectory $Global:TargetWorkingDirectory `
+        -FunctionParams $PlatformScriptParams) | Select-Object -Last 1
+
+        if ((-not ($PlatformReturn -is [hashtable])) -or [string]::IsNullOrWhiteSpace($PlatformReturn.PlatformScript) -or (-not (Test-Path -LiteralPath $PlatformReturn.PlatformScript))) {
+            Write-Log "The registry Intune Platform Script could not be generated. See the Generator_Logs folder for details." "ERROR"
+            return
+        }
+
+        $PlatformScript = $PlatformReturn.PlatformScript
+        $PlatformScriptSourceCommit = $PlatformReturn.PlatformScriptSourceCommit
+        $PlatformScriptGeneratedAt = $PlatformReturn.PlatformScriptGeneratedAt
+
+    # Names and description (Other_Tools\OrgRegistry-Intune_Helpers.ps1). The Remediation's scripts are
+    # stamped Git-Runners, so its [VER: x] marker follows the Git-Runner template, as in the app wizard.
+    $RemediationSourceCommit = Get-PDOrgRegistrySourceCommit -RepoRoot $RepoRoot -TemplateRelativePath 'Templates/Git-Runner_TEMPLATE.ps1'
+    $RemediationDisplayName = Get-PDOrgRegistryIntuneDisplayName -Type Remediation -DeployMode $Global:DeployMode -SourceCommit $RemediationSourceCommit
+    $RemediationDescription = Get-PDOrgRegistryIntuneDescription -Type Remediation -DeployMode $Global:DeployMode -SourceCommit $RemediationSourceCommit -GeneratedAt $PlatformScriptGeneratedAt
+    $PlatformScriptDisplayName = Get-PDOrgRegistryIntuneDisplayName -Type PlatformScript -DeployMode $Global:DeployMode -SourceCommit $PlatformScriptSourceCommit
+    $PlatformScriptDescription = Get-PDOrgRegistryIntuneDescription -Type PlatformScript -DeployMode $Global:DeployMode -SourceCommit $PlatformScriptSourceCommit -GeneratedAt $PlatformScriptGeneratedAt
+    # How an existing copy for this deploy mode is named, whatever its [VER: ...]
+    $PlatformScriptExistingName = Get-PDOrgRegistryIntuneDisplayName -Type PlatformScript -DeployMode $Global:DeployMode -SourceCommit '...'
+    $RemediationExistingName = Get-PDOrgRegistryIntuneDisplayName -Type Remediation -DeployMode $Global:DeployMode -SourceCommit '...'
+
     Clear
     Write-Log ""
     Write-Log "==========================================================================================="
@@ -4844,15 +4915,16 @@ Function OrganizationRegistryEntries--InTune-Setup{
     Write-Log ""
     Write-Log "The scripts have been created!" "SUCCESS"
     Write-Log ""
-    Write-Log "Next we are going to upload the detect and remediation script to InTune."
+    Write-Log "Next we are going to upload the detect and remediation script to InTune, then the Intune Platform Script."
     Write-Log "Detect Script location: $DetectScript"
     Write-Log "Remediate Script location: $RemediationScript"
+    Write-Log "Platform Script location: $PlatformScript"
     Write-Log ""
 
     Write-Log "1. In InTune, navigate to: Device > Windows > Scripts and remediations"
     Write-Log " - Direct link: https://intune.microsoft.com/#view/Microsoft_Intune_DeviceSettings/DevicesWindowsMenu/~/powershell"
     Write-Log ""
-    Write-Log "2. Navigate to your PowerDeploy Registry Update remediation script package. If you for sure do not have one, we will walk through creating one."
+    Write-Log "2. On the Remediations tab, find your existing Intune Remediation for the organization registry values: ""$RemediationExistingName"", or ""PowerDeploy Registry Update"" if it was created before this version. If you for sure do not have one, we will walk through creating one."
     Write-Log ""
     Write-Log "NOTE: Make sure that you do not leave behind old remediation scripts in production once replace them." "WARNING"
     Write-Log ""
@@ -4867,10 +4939,11 @@ Function OrganizationRegistryEntries--InTune-Setup{
         write-Log "   1. Click ""Create"""
             Write-Log ""
 
-        write-log "   2. Suggested name: ""PowerDeploy Registry Update"""
+        write-log "   2. Suggested name: ""$RemediationDisplayName"""
             Write-Log ""
 
-        Write-Log "   3. Suggested description: ""Used to update company registry values for use with PowerDeploy. For more information see the official repo: https://github.com/Santa-Cruz-COE/PowerDeploy"""
+        Write-Log "   3. Description (copy all lines):"
+        foreach ($DescriptionLine in ($RemediationDescription -split "`n")) { Write-Log "        $DescriptionLine" }
             Write-Log ""
 
         Write-Log "   4. Click Next to go to the Script settings page."
@@ -4893,8 +4966,11 @@ Function OrganizationRegistryEntries--InTune-Setup{
 
         Write-Log "  10. Click Next to go to the Assignments page and assign to your desired groups. I recommend starting with a small test group first, then expanding to the whole org (if appropriate) once confirmed working."
             Write-Log ""
-        
-        Write-Log "  11. Click ""Create"" to finish creating the remediation package."
+
+        Write-Log "  11. Still on the Assignments page, set the Schedule for EACH assigned group (click the group's schedule, ""Daily"" by default): Frequency = Hourly, Repeats every = 1 hour. Click Apply."
+            Write-Log ""
+
+        Write-Log "  12. Click ""Create"" to finish creating the remediation package."
 
 
     } else {
@@ -4911,6 +4987,14 @@ Function OrganizationRegistryEntries--InTune-Setup{
         Write-Log "   Make sure ""Run script in 64-bit PowerShell"" is set to: Yes"
             Write-Log ""
 
+        Write-Log "   On the Assignments page, make sure the Schedule for EACH assigned group is: Frequency = Hourly, Repeats every = 1 hour."
+            Write-Log ""
+
+        Write-Log "   If it is still named ""PowerDeploy Registry Update"" (or has an older [VER: ...]), rename it to: ""$RemediationDisplayName"""
+        Write-Log "   Set its Description to (copy all lines):"
+        foreach ($DescriptionLine in ($RemediationDescription -split "`n")) { Write-Log "        $DescriptionLine" }
+            Write-Log ""
+
         Write-Log "   Save your changes."
             Write-Log ""
 
@@ -4918,7 +5002,103 @@ Function OrganizationRegistryEntries--InTune-Setup{
     }
 
     Write-Log ""
+    Pause
 
+    ###########################################################################
+    # Intune Platform Script (guided manual upload)
+    ###########################################################################
+
+    Clear
+    Write-Log ""
+    Write-Log "==========================================================================================="
+    Write-Log "UPLOAD THE REGISTRY INTUNE PLATFORM SCRIPT TO INTUNE"
+    Write-Log "==========================================================================================="
+    Write-Log ""
+    Write-Log "This Intune Platform Script writes the same registry values as the Intune Remediation above. Intune runs"
+    Write-Log "Platform Scripts BEFORE Win32 apps, so during Autopilot the values are in place before PowerDeploy's"
+    Write-Log "apps and printers install. It needs no Git and no network on the device."
+    Write-Log "Keep the Intune Remediation as well: it keeps the values current every hour (key rotation and drift)."
+    Write-Log ""
+    Write-Log "Platform Script location: $PlatformScript"
+    Write-Log ""
+    Write-Log "NOTE: Keep only ONE org registry Intune Platform Script per deploy mode. If ""$PlatformScriptExistingName"" already exists in Intune, replace its script file (steps below) instead of adding a second one." "WARNING"
+    Write-Log ""
+    Write-Log "1. In the Intune admin center, go to: Devices > Scripts and remediations > Platform scripts"
+    Write-Log " - Direct link: https://intune.microsoft.com/#view/Microsoft_Intune_DeviceSettings/DevicesWindowsMenu/~/powershell (then select the Platform scripts tab)"
+    Write-Log ""
+    Write-Log "Do you need to create a new Intune Platform Script for this deploy mode ($Global:DeployMode)?" "WARNING"
+    $Answer = Read-Host "(y/n)"
+
+    if ($Answer -eq "y"){
+
+        Write-Log "  To create a new Intune Platform Script..."
+            Write-Log ""
+
+        Write-Log "   1. Click ""Add"", then select ""Windows 10 and later""."
+            Write-Log ""
+
+        Write-Log "   2. Name: ""$PlatformScriptDisplayName"""
+            Write-Log ""
+
+        Write-Log "   3. Description (copy all lines):"
+        foreach ($DescriptionLine in ($PlatformScriptDescription -split "`n")) { Write-Log "        $DescriptionLine" }
+            Write-Log ""
+
+        Write-Log "   4. Click Next to go to the Script settings page."
+            Write-Log ""
+
+        Write-Log "   5. For ""Script location"", select the script located at: $PlatformScript"
+            Write-Log ""
+
+        Write-Log "   6. For ""Run this script using the logged on credentials"" select: No"
+            Write-Log ""
+
+        Write-Log "   7. For ""Enforce script signature check"" select: No"
+            Write-Log ""
+
+        Write-Log "   8. For ""Run script in 64-bit PowerShell host"" select: Yes"
+            Write-Log ""
+
+        Write-Log "   9. Click Next to go to the Scope tags page and add any scope tags you use."
+            Write-Log ""
+
+        Write-Log "  10. Click Next to go to the Assignments page and assign it to DEVICE groups (groups whose members are devices, such as your Autopilot device group). Only scripts assigned to device groups run in the Autopilot device phase, before Win32 apps install. I recommend starting with a small test group first."
+            Write-Log ""
+
+        Write-Log "  11. Click Next, then ""Add"" to finish creating the Intune Platform Script."
+            Write-Log ""
+
+    } else {
+
+        Write-Log "  Replace the script file on your existing Intune Platform Script (""$PlatformScriptExistingName"") as follows..."
+            Write-Log ""
+
+        Write-Log "   Open it and select Properties. Next to ""Script settings"", click Edit."
+            Write-Log ""
+
+        Write-Log "   For ""Script location"", select the script located at: $PlatformScript"
+            Write-Log ""
+
+        Write-Log "   Make sure ""Run this script using the logged on credentials"" = No, ""Enforce script signature check"" = No, ""Run script in 64-bit PowerShell host"" = Yes."
+            Write-Log ""
+
+        Write-Log "   Next to ""Basics"", click Edit and set the Name to: ""$PlatformScriptDisplayName"""
+        Write-Log "   and the Description to (copy all lines):"
+        foreach ($DescriptionLine in ($PlatformScriptDescription -split "`n")) { Write-Log "        $DescriptionLine" }
+            Write-Log ""
+
+        Write-Log "   Make sure it is assigned to DEVICE groups, then click ""Review + save"", then ""Save""."
+            Write-Log ""
+
+    }
+
+    Write-Log ""
+
+    # >>> MARKED FOR FUTURE DELETION (org registry Intune Platform Script, 2026-11) >>>
+    # Packaging the remediation script as an InTuneWin Win32 app was the old way to get the org registry
+    # values onto devices during Autopilot. The Intune Platform Script above replaces it. Kept, unchanged,
+    # until the Platform Script is proven in production; then delete from this line to the matching
+    # "<<< END MARKED FOR FUTURE DELETION" line below.
     Write-Log "Do you need to create a new InTuneWin package entry in InTune?" "WARNING"
     $Answer = Read-Host "(y/n)"
     if ($Answer -eq "y"){
@@ -4954,6 +5134,7 @@ Function OrganizationRegistryEntries--InTune-Setup{
 
 
     }
+    # <<< END MARKED FOR FUTURE DELETION (org registry Intune Platform Script, 2026-11) <<<
 
     Pause
     Write-Log ""
