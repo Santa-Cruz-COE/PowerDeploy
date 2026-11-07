@@ -5346,22 +5346,24 @@ Add-TestCase 'M5-17' 'the MAA menu only reads its own text and calls no tenant e
 
     $guidance = Get-PDGraphUploadMaaGuidance -CredentialPath $path
 
-    Assert-Like '*PowerDeploy Intune Upload*' $guidance.Message 'it names the configured application'
+    $stepText = @($guidance.Steps) -join ' | '
+    Assert-Like '*PowerDeploy Intune Upload*' $stepText 'it names the configured application'
     Assert-Equal $script:M5ClientId ([string]$guidance.ClientId) 'and its client id, from the stored credential'
-    Assert-Like '*Multi Admin Approval*' (@($guidance.Steps) -join ' -> ') 'the portal path from spec 7.5'
-    Assert-Like '*justification*' (@($guidance.Steps) -join ' -> ') 'including the justification step'
-    Assert-Like '*application-only*' (@($guidance.Notes) -join ' | ') 'what the exclusion covers'
-    Assert-Like '*rotat*' (@($guidance.Notes) -join ' | ') 'and that rotation does not undo it'
-    Assert-Like '*Apps policy*' (@($guidance.Steps) -join ' -> ') 'the Apps policy exclusion'
-    Assert-Like '*Scripts profile type*Exclusions*' (@($guidance.Steps) -join ' -> ') 'and, separately, the Scripts policy exclusion'
-    Assert-Like '*second admin*' (@($guidance.Notes) -join ' | ') 'each exclusion change needs a second admin'
-    Assert-Like '*Not yet confirmed*remediations*' (@($guidance.Notes) -join ' | ') 'remediation coverage is stated as unconfirmed'
-    Assert-Like '*Scripts policy*' $guidance.Message 'the one-line summary names both policies'
+    Assert-Like "*$($script:M5ClientId)*" $stepText 'the client id is shown in the selection step'
+    Assert-Like '*Multi Admin Approval > Access policies*' $stepText 'the Intune admin center path from spec 7.5'
+    Assert-Like '*justification*' $stepText 'including the justification step'
+    Assert-Like '*second admin*' $stepText 'each exclusion change needs a second admin'
+    Assert-Like '*Complete*' $stepText 'and the requester completes it'
+    Assert-Equal 2 @($guidance.Policies).Count 'two access policies, one exclusion each'
+    Assert-Like '*Apps policy*' (@($guidance.Policies) -join ' | ') 'the Apps policy exclusion'
+    Assert-Like '*Scripts policy*Platform Script*Remediation*' (@($guidance.Policies) -join ' | ') 'and, separately, the Scripts policy exclusion'
+    Assert-Like '*client secret does not remove*' (@($guidance.Notes) -join ' | ') 'renewal does not undo it'
+    Assert-Like '*Multi-Admin Approval*' $guidance.Message 'the summary says when this is needed'
     Assert-Equal 0 @($script:M5.Calls).Count 'showing MAA instructions makes no Graph call at all'
 
     # With no credential stored it still answers, from the built-in defaults.
     $fallback = Get-PDGraphUploadMaaGuidance -CredentialPath (Join-Path $tempRoot 'm5-maa\none.clixml')
-    Assert-Like '*PowerDeploy Intune Upload*' $fallback.Message 'the configured name defaults to the feature default'
+    Assert-Like '*PowerDeploy Intune Upload*' (@($fallback.Steps) -join ' | ') 'the configured name defaults to the feature default'
     Assert-Like '*not configured*' $fallback.ClientId 'and says no client id is known yet'
 }
 

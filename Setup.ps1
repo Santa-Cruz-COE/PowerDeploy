@@ -5398,8 +5398,7 @@ Function Read-GraphUploadSecretLifetime {
     While ($true) {
 
         Write-Log "How many days should this PC's secret last before it has to be rotated?" 'WARNING'
-        Write-Log "     Press Enter for $Default day(s) ($($Default * 24) hours). A short lifetime limits how long a copied secret could be used;" 'INFO2'
-        Write-Log "     uploads offer to sign in and create a new one when it has expired or is about to." 'INFO2'
+        Write-Log "     Press Enter for $Default day(s) ($($Default * 24) hours). A short lifetime limits how long a copied secret could be used; uploads offer to sign in and create a new one when it has expired or is about to." 'INFO2'
 
         $Answer = ([string](Read-Host "Days")).Trim()
 
@@ -6132,19 +6131,26 @@ Function Show-GraphUploadMaaInstructions {
 
     $Guidance = Get-PDGraphUploadMaaGuidance
 
-    Write-Log $Guidance.Message 'WARNING'
-    Write-Log "     Client ID: $($Guidance.ClientId)" 'INFO2'
+    Write-Log $Guidance.Message
     Write-Log ""
-    Write-Log "Do this in the Intune admin center (Setup cannot do it for you):" 'WARNING'
+    Write-Log "Add the exclusion to each of these access policies (skip any your tenant doesn't have):" 'WARNING'
 
-    foreach ($Step in @($Guidance.Steps)) {
-        Write-Log "     $Step" 'INFO2'
+    foreach ($Policy in @($Guidance.Policies)) {
+        Write-Log "  - $Policy"
     }
 
     Write-Log ""
+    Write-Log "In the Intune admin center, for each policy:" 'WARNING'
+
+    foreach ($Step in @($Guidance.Steps)) {
+        Write-Log "  $Step"
+    }
+
+    Write-Log ""
+    Write-Log "Good to know:"
 
     foreach ($Note in @($Guidance.Notes)) {
-        Write-Log "     - $Note" 'INFO2'
+        Write-Log "  - $Note"
     }
 
     Write-Log ""

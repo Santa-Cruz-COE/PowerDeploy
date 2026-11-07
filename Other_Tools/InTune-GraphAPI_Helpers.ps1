@@ -6707,35 +6707,32 @@ function Get-PDGraphUploadMaaGuidance {
 
     # Two access policies, two exclusions: MAA protects apps and scripts with separate policies
     # (by profile type), and excluding the registration from one does nothing for the other.
+    # The same five steps apply to each, so they are listed once.
+    $policies = @(
+        'Apps policy:    needed for printer and app uploads',
+        'Scripts policy: needed for Intune Platform Script and Intune Remediation uploads'
+    )
+
     $steps = @(
-        'Intune admin center -> Tenant administration -> Multi Admin Approval -> Access policies',
-        '-> Apps policy -> Exclusions -> Add enterprise applications',
-        ('-> select {0} (Intune lists app registrations here as enterprise applications) -> submit a justification' -f $name),
-        '-> another authorized administrator approves',
-        '-> requester selects Complete',
-        'Then the same again for scripts, separately from the Apps policy:',
-        'Intune admin center -> Tenant administration -> Multi Admin Approval -> Access policies',
-        '-> the access policy for the Scripts profile type -> Exclusions -> Add enterprise applications',
-        ('-> select {0} -> submit a justification' -f $name),
-        '-> another authorized administrator approves',
-        '-> requester selects Complete'
+        '1. Tenant administration > Multi Admin Approval > Access policies',
+        '2. Open the policy > Exclusions > Add enterprise applications',
+        ('3. Select "{0}" (Client ID: {1}) and enter a justification' -f $name, $id),
+        '4. A second admin approves the change',
+        '5. Open the policy again and click Complete'
     )
 
     $notes = @(
-        'Why: with Multi-Admin Approval on, every change to Intune apps or scripts waits for a second admin to approve it. The exclusions let uploads made by the PowerDeploy Azure App Registration go through without that wait.',
-        'Apps and scripts are protected by separate access policies, so the registration needs an exclusion in each: the Apps policy for app uploads, and the Scripts policy for Intune platform scripts and remediations. Each exclusion change needs approval by a second admin.',
-        'Not yet confirmed: whether the Scripts policy also covers remediations. This will be tested against a live tenant.',
-        'It only covers the app-registration (application-only) uploads PowerDeploy makes. Changes you make yourself in the Intune portal still need approval as before.',
-        'You only do this once per policy. Rotating this PC''s secret does not undo it, because the exclusion belongs to the app registration, not the secret.',
-        'Without the exclusion, Intune refuses automatic uploads. The wizard tells you that and switches to the guided manual setup.',
-        '"Test config" cannot tell whether the exclusions are in place (it only reads). Your first automatic upload will.'
+        'Renewing this PC''s client secret does not remove the exclusion.',
+        'Changes you make yourself in the Intune admin center still need approval.',
+        'Test config can''t check this. Your first API upload will.'
     )
 
     return @{
         AppDisplayName = $name
         ClientId       = $id
+        Policies       = @($policies)
         Steps          = @($steps)
         Notes          = @($notes)
-        Message        = ('Add "{0}" to the exclusions of your Multi-Admin Approval Apps policy and, separately, your Scripts policy.' -f $name)
+        Message        = 'Only needed if your tenant uses Multi-Admin Approval (MAA). Without an exclusion, MAA holds every API upload for a second admin''s approval, and the wizard falls back to the guided manual steps.'
     }
 }
