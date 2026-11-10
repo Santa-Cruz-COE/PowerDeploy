@@ -5591,14 +5591,34 @@ Function Show-GraphUploadCredentialState {
         return $summary
     }
 
+    # The summary goes through the upload loader, which refuses an expired secret and so returns no
+    # details for one. An expired secret is the normal case with a 24-hour lifetime and rotation fixes
+    # it, so read the details with the administration loader instead of reporting a broken file.
+    $details = $summary
+    $expired = $false
+    if (-not $summary.Usable) {
+        try {
+            $details = Get-PDGraphCredentialMetadata
+            $expired = ((Get-PDGraphSecretRenewalNeed -ExpiresOn $details.SecretExpiresOn) -eq 'Expired')
+        } Catch {
+            $details = $summary
+        }
+    }
+
+    $keyIdText = 'not recorded (at rotation the old secret is not deleted from Entra; you delete it there yourself)'
+    if (-not [string]::IsNullOrWhiteSpace([string]$details.SecretKeyId)) { $keyIdText = [string]$details.SecretKeyId }
+
     Write-Log "Stored credential for this Windows account:" 'WARNING'
-    Write-Log ("     Application: {0}" -f [string]$summary.AppDisplayName) 'INFO2'
-    Write-Log ("     Tenant ID:   {0}" -f [string]$summary.TenantId) 'INFO2'
-    Write-Log ("     Client ID:   {0}" -f [string]$summary.ClientId) 'INFO2'
+    Write-Log ("     Application: {0}" -f [string]$details.AppDisplayName) 'INFO2'
+    Write-Log ("     Tenant ID:   {0}" -f [string]$details.TenantId) 'INFO2'
+    Write-Log ("     Client ID:   {0}" -f [string]$details.ClientId) 'INFO2'
 
     if ($summary.Usable) {
         Write-Log ("     Secret expires: {0} ({1} left)" -f (Format-PDGraphExpiry -ExpiresOn $summary.SecretExpiresOn), (Format-PDGraphTimeRemaining -ExpiresOn $summary.SecretExpiresOn)) 'INFO2'
-        Write-Log ("     Secret key id:  {0}" -f $(if ([string]::IsNullOrWhiteSpace($summary.SecretKeyId)) { 'not recorded (at rotation the old secret is not deleted from Entra; you delete it there yourself)' } else { [string]$summary.SecretKeyId })) 'INFO2'
+        Write-Log ("     Secret ID:      {0}" -f $keyIdText) 'INFO2'
+    } elseif ($expired) {
+        Write-Log ("Secret expired: {0}." -f (Format-PDGraphExpiry -ExpiresOn $details.SecretExpiresOn)) 'ERROR'
+        Write-Log ("     Secret ID:      {0}" -f $keyIdText) 'INFO2'
     } else {
         Write-Log "     The file exists but is not usable: $($summary.Message)" 'ERROR'
     }
@@ -5744,7 +5764,7 @@ Function Invoke-GraphUploadEnterCredential {
 
     # Spec 7.2 "Manual entry": TenantId, ClientId, expiry and secret (Read-Host -AsSecureString),
     # tested against the tenant BEFORE the local configuration is replaced. AppObjectId and
-    # SecretKeyId (Entra's "Secret ID") may be absent and are never invented; without a key id,
+    # SecretKeyId (Entra's "Secret ID") may be absent and are never invented; without a Secret ID,
     # rotation does not delete the old secret from Entra and says so - it never guesses at it.
 
     Write-Log ""
@@ -5931,7 +5951,7 @@ Function Invoke-GraphUploadTestConnection {
 Function Invoke-GraphUploadRotateSecret {
 
     # Spec 7.4, in order: add the replacement while the old one still works, test it, save it, and
-    # only then revoke the OLD secret by its recorded key id. With no recorded key id nothing is
+    # only then revoke the OLD secret by its recorded Secret ID. With no recorded Secret ID nothing is
     # revoked, and Setup says it assumes a hand-entered secret (Manual option) and leaves it for you
     # to delete. After a successful rotation exactly one line reports the old secret (deleted /
     # could not be deleted / no Secret ID). If the test or the save fails the old credential is still
@@ -5955,7 +5975,8 @@ Function Invoke-GraphUploadRotateSecret {
 
     if ($LifetimeDays -le 0) {
 
-        # The menu's Rotate option: show what is stored, ask for the lifetime and the tenant.
+        # The menu's Rotate option: show what is stored and ask for the lifetime. The tenant is the
+        # stored credential's own; it is asked for only when it cannot be read.
         $Summary = Show-GraphUploadCredentialState
 
         if (-not $Summary.Stored) {
@@ -5963,6 +5984,10 @@ Function Invoke-GraphUploadRotateSecret {
             return $false
         }
 
+        try { $StoredTenant = [string](Get-PDGraphCredentialMetadata).TenantId } Catch { $StoredTenant = $null }
+
+        Write-Log ""
+        Write-Log "We will now update and replace the secret."
         $LifetimeDays = Read-GraphUploadSecretLifetime -Default ([int]$PDGraph.DefaultSecretLifetimeDays)
 
     } else {
@@ -6182,7 +6207,7 @@ Function Invoke-GraphUploadRemoveCredential {
     Write-Log ""
 
     $Revoke = Read-GraphUploadYesNo -Question "Also revoke this credential's own secret in Entra?" -Default $false `
-                                        -Note "Revoking needs a temporary administrator sign-in, and only revokes the secret whose key id is recorded here ($($(if ([string]::IsNullOrWhiteSpace($Summary.SecretKeyId)) { 'none recorded - it cannot be revoked from here' } else { [string]$Summary.SecretKeyId }))). Choosing no leaves that secret active until someone revokes it in Entra."
+                                        -Note "Revoking needs a temporary administrator sign-in, and only revokes the secret whose Secret ID is recorded here ($($(if ([string]::IsNullOrWhiteSpace($Summary.SecretKeyId)) { 'none recorded - it cannot be revoked from here' } else { [string]$Summary.SecretKeyId }))). Choosing no leaves that secret active until someone revokes it in Entra."
 
     $Session = $null
 

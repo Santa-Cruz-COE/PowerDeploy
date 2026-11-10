@@ -491,7 +491,7 @@ Add-TestCase 'C02' 'Near-expiry credentials stay usable but return a warning' {
     $loaded = Get-PDGraphCredential -Path $path
     Assert-True ($loaded.HoursUntilExpiry -le 12 -and $loaded.HoursUntilExpiry -gt 11) "hours until expiry is exact, not whole days ($($loaded.HoursUntilExpiry))"
     Assert-Equal 1 @($loaded.Warnings | Where-Object { $_ -like '*expire*' }).Count 'exactly one expiry warning'
-    Assert-Equal 1 @($loaded.Warnings | Where-Object { $_ -like '*key id*' }).Count 'the missing key id is separately reported'
+    Assert-Equal 1 @($loaded.Warnings | Where-Object { $_ -like '*Secret ID*' }).Count 'the missing Secret ID is separately reported'
     Assert-Like '*expire*' @($loaded.Warnings | Where-Object { $_ -like '*expire*' })[0] 'warning is about expiry'
 }
 
@@ -641,7 +641,7 @@ Add-TestCase 'C02b' 'A recorded key id silences the rotation warning' {
     Save-PDGraphCredential -Credential $c -Path $path | Out-Null
 
     $loaded = Get-PDGraphCredential -Path $path
-    Assert-Equal 0 @($loaded.Warnings | Where-Object { $_ -like '*key id*' }).Count 'no key id warning when it is recorded'
+    Assert-Equal 0 @($loaded.Warnings | Where-Object { $_ -like '*Secret ID*' }).Count 'no Secret ID warning when it is recorded'
 }
 
 # ---------------------------------------------------------------------------
@@ -4983,7 +4983,7 @@ Add-TestCase 'C05a' 'the renewal offer: Ok asks nothing; Soon declined continues
     }
 }
 
-Add-TestCase 'C05b' 'renewing before an upload is quiet and reuses the stored tenant; the menu option is unchanged' {
+Add-TestCase 'C05b' 'renewing before an upload is quiet and reuses the stored tenant; the menu option also reuses it' {
     $savedRoot = $env:LOCALAPPDATA
     $root      = Join-Path $tempRoot 'c05b-localappdata'
     try {
@@ -5016,7 +5016,7 @@ Add-TestCase 'C05b' 'renewing before an upload is quiet and reuses the stored te
         $menu = Invoke-GraphUploadRotateSecret
         Assert-Equal 1 $script:C05.Shown 'the menu option still shows the stored credential'
         Assert-Equal 1 $script:C05.LifetimeAsked 'and asks the lifetime'
-        Assert-True ([string]::IsNullOrWhiteSpace($script:C05.Tenants[1])) 'and leaves the tenant question to the sign-in'
+        Assert-Equal $script:M5TenantId $script:C05.Tenants[1] 'and uses the stored tenant too, instead of asking for it'
 
         # The sign-in skips the tenant question only for a real GUID.
         $connect = Import-PDSetupFunctionText -Name 'Connect-GraphUploadAdminSession'
@@ -5025,6 +5025,38 @@ Add-TestCase 'C05b' 'renewing before an upload is quiet and reuses the stored te
     } finally {
         $env:LOCALAPPDATA = $savedRoot
         $script:C05 = $null
+    }
+}
+
+Add-TestCase 'C05c' 'an expired stored secret is shown with its details and the rotate option, not as a broken file' {
+    $savedRoot = $env:LOCALAPPDATA
+    $root      = Join-Path $tempRoot 'c05c-localappdata'
+    try {
+        $env:LOCALAPPDATA = $root
+        . ([scriptblock]::Create((Import-PDSetupFunctionText -Name 'Show-GraphUploadCredentialState')))
+
+        $script:C05c = @{ Log = @() }
+        function Write-Log { param([string]$Message, [string]$Level) $script:C05c.Log += ('[{0}] {1}' -f $Level, $Message) }
+
+        $c = New-PDGraphCredentialObject -TenantId $script:M5TenantId -ClientId $script:M5ClientId -ClientSecret (New-FakeSecureString) `
+                -SecretExpiresOn ([System.DateTimeOffset]::UtcNow.AddHours(-3)) -AppDisplayName 'PowerDeploy Intune Upload'
+        $storePath = Get-PDGraphCredentialPath
+        Assert-Like "$root*" $storePath 'the temporary store, never the real one'
+        $null = Save-PDGraphCredential -Credential $c -Path $storePath
+
+        $shown = Show-GraphUploadCredentialState
+        $text  = @($script:C05c.Log) -join ' | '
+        Assert-True ([bool]$shown.Stored) 'the credential is reported as stored'
+        Assert-Like "*Tenant ID:   $($script:M5TenantId)*" $text 'the tenant id is shown'
+        Assert-Like "*Client ID:   $($script:M5ClientId)*" $text 'the client id is shown'
+        Assert-Like '*Application: PowerDeploy Intune Upload*' $text 'the application name is shown'
+        $expiredLines = @(@($script:C05c.Log) | Where-Object { $_ -like '`[ERROR`]*' })
+        Assert-Equal 1 $expiredLines.Count 'exactly one red error line: an expired secret stops uploads'
+        Assert-Match '^\[ERROR\] Secret expired: \d{4}-\d{2}-\d{2} \d{2}:\d{2} local time\.$' $expiredLines[0] 'the expiry, and nothing else on that line'
+        Assert-True (-not ($text -like '*not usable*')) 'and it is not called unusable'
+    } finally {
+        $env:LOCALAPPDATA = $savedRoot
+        $script:C05c = $null
     }
 }
 
