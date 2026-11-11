@@ -60,7 +60,10 @@ $featureFiles = @(
     'Templates\OrgRegistry-PlatformScript_TEMPLATE.ps1',
     'Other_Tools\OrgRegistry-Intune_Helpers.ps1',
     'Other_Tools\Generate_Install-Command.ps1',
-    'Tests\OrgRegistryPlatformScript.Tests.ps1'
+    'Tests\OrgRegistryPlatformScript.Tests.ps1',
+    # Org registry scripts API upload (Part 3) and the Windows app bulk delete (Part 5, in the files above)
+    'Other_Tools\Upload-InTuneOrgRegistryScripts.ps1',
+    'Tests\IntuneOrgRegistryScripts.Tests.ps1'
 )
 
 # Joined by M7 (duplicate-printer guard); until then its pre-existing bytes warn instead of failing.

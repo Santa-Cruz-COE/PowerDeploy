@@ -5388,7 +5388,7 @@ Add-TestCase 'M5-17' 'the MAA menu only reads its own text and calls no tenant e
     Assert-Like '*Complete*' $stepText 'and the requester completes it'
     Assert-Equal 2 @($guidance.Policies).Count 'two access policies, one exclusion each'
     Assert-Like '*Apps policy*' (@($guidance.Policies) -join ' | ') 'the Apps policy exclusion'
-    Assert-Like '*Scripts policy*Platform Script*Remediation*' (@($guidance.Policies) -join ' | ') 'and, separately, the Scripts policy exclusion'
+    Assert-Like '*Scripts policy*Remediation*Platform Script*' (@($guidance.Policies) -join ' | ') 'and, separately, the Scripts policy exclusion'
     Assert-Like '*client secret does not remove*' (@($guidance.Notes) -join ' | ') 'renewal does not undo it'
     Assert-Like '*Multi-Admin Approval*' $guidance.Message 'the summary says when this is needed'
     Assert-Equal 0 @($script:M5.Calls).Count 'showing MAA instructions makes no Graph call at all'

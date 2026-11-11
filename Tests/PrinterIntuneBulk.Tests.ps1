@@ -196,6 +196,9 @@ Add-TestCase 'B01' 'dot-sourcing the printer helpers and the bulk tools is silen
                         'ConvertFrom-PDPrinterIntuneDisplayName', 'New-PDPrinterIntuneMetadata',
                         'Get-PDPrinterJsonCatalog', 'New-PDPrinterBulkDraft', 'Resolve-PDPrinterBulkStage', 'Invoke-PDPrinterBulkCreate',
                         'Get-PDIntunePrinterApps', 'Resolve-PDPrinterDeleteSelection', 'Invoke-PDPrinterBulkDelete',
+                        'Get-PDIntuneAppListByPrefix', 'Get-PDIntuneWindowsApps', 'ConvertFrom-PDWindowsAppIntuneDisplayName',
+                        'New-PDIntuneAppDeleteSheet', 'New-PDWindowsAppDeleteSheet', 'Resolve-PDIntuneAppDeleteSelection',
+                        'Invoke-PDIntuneAppBulkDelete', 'Invoke-PDWindowsAppBulkDelete',
                         'Read-PDBulkCsv', 'Write-PDBulkCsv', 'Resolve-PDBulkGroups', 'Backup-PDIntuneApp', 'Remove-PDIntuneApp',
                         'Get-PDCsvAssociatedProgram', 'Test-PDGridEditorAvailable', 'ConvertTo-PDGridTable', 'ConvertFrom-PDGridTable',
                         'ConvertTo-PDGridRowFilter', 'Show-PDCsvGridEditor')) {
@@ -230,12 +233,12 @@ Add-TestCase 'B03' 'the wizard builds through the shared builder, and the bulk m
     Assert-True ($commands -contains 'New-PDPrinterIntuneMetadata') 'the wizard calls New-PDPrinterIntuneMetadata'
     Assert-True ($commands -notcontains 'New-IntunePrinterDescription') 'the wizard no longer builds the Description inline'
 
-    foreach ($entry in @('Printer--InTune-BulkCreate', 'Printer--InTune-BulkDelete')) {
+    foreach ($entry in @('Printer--InTune-BulkCreate', 'Printer--InTune-BulkDelete', 'WindowsApp--InTune-BulkDelete')) {
         $fn = @($script:SetupFunctions | Where-Object { $_.Name -eq $entry })
         Assert-Equal 1 $fn.Count "$entry is defined once (the menu reflects on '*--*')"
         Assert-Equal 0 @($fn[0].FindAll({ param($n) $n -is [System.Management.Automation.Language.ExitStatementAst] }, $true)).Count "$entry must never call exit"
     }
-    foreach ($helper in @('Test-PrinterBulkReady', 'Open-PrinterBulkSheet', 'Wait-PrinterBulkSheet', 'Edit-PrinterBulkSheet', 'Get-PrinterBulkJsonPath')) {
+    foreach ($helper in @('Test-PrinterBulkReady', 'Open-PrinterBulkSheet', 'Wait-PrinterBulkSheet', 'Edit-PrinterBulkSheet', 'Get-PrinterBulkJsonPath', 'Invoke-IntuneAppBulkDeleteSheet')) {
         $fn = @($script:SetupFunctions | Where-Object { $_.Name -eq $helper })
         Assert-Equal 1 $fn.Count "$helper is defined once"
         Assert-True ($helper -notlike '*--*') "$helper must not contain '--' (it would appear in the menu)"
@@ -814,6 +817,104 @@ Add-TestCase 'B71' 'bulk delete backs up each app first and carries on past fail
         $order = @(Get-MockCalls | Where-Object { $_.Uri -like "*/mobileApps/$id*" } | ForEach-Object { $_.Method })
         Assert-Equal 'Get|Get|Delete' ($order -join '|') "$id was read (app, assignments) before it was deleted"
     }
+}
+
+# ---------------------------------------------------------------------------
+# Windows app bulk delete (WindowsApp--InTune-BulkDelete): the same flow and code
+# ---------------------------------------------------------------------------
+
+Add-TestCase 'B72' 'Windows app names: the WindowsApp--InTune-Setup format parses, everything else is not an app' {
+    $cases = @(
+        @{ Name = 'APP: Zoom'; App = 'Zoom'; Mode = 'PRODUCTION'; Ver = '' },
+        @{ Name = 'APP: Zoom [MODE: PUBLIC-TESTING] [VER: abc1234]'; App = 'Zoom'; Mode = 'PUBLIC-TESTING'; Ver = 'abc1234' },
+        @{ Name = 'APP: 7-Zip [x64] [MODE: PRIVATE-DEVELOPMENT] [VER: abc.UnstagedChanges]'; App = '7-Zip [x64]'; Mode = 'PRIVATE-DEVELOPMENT'; Ver = 'abc.UnstagedChanges' },
+        @{ Name = 'APP: Zoom [OLD - f9068c8]'; App = 'Zoom [OLD - f9068c8]'; Mode = 'PRODUCTION'; Ver = '' },
+        @{ Name = 'APP: Zoom [MODE: public-testing] [VER: a]'; App = 'Zoom [MODE: public-testing] [VER: a]'; Mode = 'PRODUCTION'; Ver = '' }
+    )
+    foreach ($case in $cases) {
+        $parsed = ConvertFrom-PDWindowsAppIntuneDisplayName -DisplayName $case.Name
+        Assert-True $parsed.IsWindowsApp "'$($case.Name)' is a Windows app"
+        Assert-Equal $case.App $parsed.AppName "'$($case.Name)' app name"
+        Assert-Equal $case.Mode $parsed.DeployMode "'$($case.Name)' mode (a lower-case mode is not a mode)"
+        Assert-Equal $case.Ver $parsed.Version "'$($case.Name)' version"
+    }
+    foreach ($foreign in @($null, '', 'APP:Zoom', 'app: Zoom', 'APP: ', 'PRINTER: Lobby', 'Zoom', ' X APP: Zoom', 42)) {
+        Assert-True (-not (ConvertFrom-PDWindowsAppIntuneDisplayName -DisplayName $foreign).IsWindowsApp) "'$foreign' is not a Windows app"
+    }
+}
+
+Add-TestCase 'B73' 'the Windows app list asks with startswith APP:, follows pages, and keeps Win32 apps only' {
+    Set-MockGraph -Router {
+        param($Method, $Uri)
+        if ($Method -eq 'Get' -and $Uri -like '*/deviceAppManagement/mobileApps?*' -and $Uri -notlike '*page=2*') {
+            return (New-MockResponse -Body @{
+                value = @(
+                    @{ '@odata.type' = '#microsoft.graph.win32LobApp'; id = 'w1'; displayName = 'APP: Zoom'; createdDateTime = '2026-10-01T12:30:00Z' },
+                    @{ '@odata.type' = '#microsoft.graph.winGetApp'; id = 'w2'; displayName = 'APP: Store thing' },
+                    @{ '@odata.type' = '#microsoft.graph.win32LobApp'; id = 'w3'; displayName = 'APPLICATIONS list' }
+                )
+                '@odata.nextLink' = 'https://graph.microsoft.com/beta/deviceAppManagement/mobileApps?page=2'
+            })
+        }
+        if ($Method -eq 'Get' -and $Uri -like '*page=2*') {
+            return (New-MockResponse -Body @{ value = @(@{ id = 'w4'; displayName = 'APP: Adobe Reader [MODE: PUBLIC-DEVELOPMENT] [VER: abc]' }) })
+        }
+        return $null
+    }
+
+    $apps = @(Get-PDIntuneWindowsApps -AuthContext $script:FakeAuth)
+    Assert-Like "*startswith(displayName,'APP: ')*" (Get-MockCalls)[0].Uri 'the list asks with startswith'
+    Assert-Equal 'w4,w1' (@($apps | ForEach-Object AppId) -join ',') 'the second page is followed; the non-Win32 app and the non-APP name are dropped; sorted by name'
+    Assert-Equal 'PUBLIC-DEVELOPMENT' $apps[0].DeployMode 'mode parsed'
+    Assert-Equal 'Zoom' $apps[1].AppName 'name parsed'
+    Assert-Equal '2026-10-01' ($apps[1].Created.Substring(0, 10)) 'created date'
+}
+
+Add-TestCase 'B74' 'Windows app delete: sheet columns, AppId matching, back up first, carry on past failures' {
+    $apps = @(
+        [pscustomobject]@{ AppId = 'a1'; DisplayName = 'APP: One'; AppName = 'One'; DeployMode = 'PRODUCTION'; Version = ''; Created = '' },
+        [pscustomobject]@{ AppId = 'a2'; DisplayName = 'APP: Two'; AppName = 'Two'; DeployMode = 'PRODUCTION'; Version = ''; Created = '' },
+        [pscustomobject]@{ AppId = 'a3'; DisplayName = 'APP: Three'; AppName = 'Three'; DeployMode = 'PUBLIC-TESTING'; Version = 'abc'; Created = '' }
+    )
+    $sheet = @(New-PDWindowsAppDeleteSheet -Apps $apps)
+    Assert-Equal ($script:PDBulk.AppDeleteColumns -join ',') (@($sheet[0].PSObject.Properties | ForEach-Object Name) -join ',') 'the sheet has exactly the app columns'
+    Assert-Equal 'Delete,DisplayName,AppName,DeployMode,Version,Created,AppId' ($script:PDBulk.AppDeleteColumns -join ',') 'the app columns'
+    Assert-Equal '' (@($sheet | ForEach-Object Delete) -join '') 'nothing is pre-marked'
+
+    $rows = @(
+        [pscustomobject]@{ RowNumber = 2; Delete = 'Y'; AppId = 'A1' },
+        [pscustomobject]@{ RowNumber = 3; Delete = 'Y'; AppId = 'a2' },
+        [pscustomobject]@{ RowNumber = 4; Delete = ''; AppId = 'a3' }
+    )
+    $selection = Resolve-PDIntuneAppDeleteSelection -Rows $rows -CurrentApps $apps
+    Assert-Equal 'a1,a2' (@($selection.Selected | ForEach-Object AppId) -join ',') 'matched by AppId'
+
+    $backups = Join-Path $script:TempRoot ('b74-' + [guid]::NewGuid().ToString('N'))
+    Set-AppStoreMock -Behaviour @{ 'a1' = 'delete-fails'; 'a2' = 'ok' }
+    $results = @(Invoke-PDWindowsAppBulkDelete -Apps @($selection.Selected) -BackupFolder $backups -AuthContext $script:FakeAuth)
+    Assert-Equal 'DeleteFailed|Deleted' (@($results | ForEach-Object Result) -join '|') 'the failure does not stop the next app'
+    Assert-Equal ($script:PDBulk.AppDeleteResultColumns -join ',') (@($results[0].PSObject.Properties | ForEach-Object Name) -join ',') 'result columns'
+    Assert-Equal 'Two' $results[1].AppName 'the app name is carried into the results'
+    Assert-True (Test-Path -LiteralPath (Join-Path $backups 'a1.json')) 'the app that failed to delete was backed up first'
+    Assert-Equal 'Get|Get|Delete' (@(Get-MockCalls | Where-Object { $_.Uri -like '*/mobileApps/a2*' } | ForEach-Object { $_.Method }) -join '|') 'app and assignments read before the delete'
+
+    # The printer results keep their own columns through the shared code.
+    Set-AppStoreMock -Behaviour @{ 'p1' = 'ok' }
+    $printer = @(Invoke-PDPrinterBulkDelete -Apps @((New-ExistingApp -Id 'p1' -Name 'Lobby')) -BackupFolder $backups -AuthContext $script:FakeAuth)
+    Assert-Equal ($script:PDBulk.DeleteResultColumns -join ',') (@($printer[0].PSObject.Properties | ForEach-Object Name) -join ',') 'printer result columns unchanged'
+    Assert-Equal 'Lobby' $printer[0].PrinterName 'printer name carried'
+}
+
+Add-TestCase 'B75' 'both bulk delete menu entries run the one shared sheet flow, and the app text says devices keep the application' {
+    foreach ($entry in @('Printer--InTune-BulkDelete', 'WindowsApp--InTune-BulkDelete')) {
+        $fn = @($script:SetupFunctions | Where-Object { $_.Name -eq $entry })[0]
+        $commands = @($fn.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() })
+        Assert-True ($commands -contains 'Invoke-IntuneAppBulkDeleteSheet') "$entry uses the shared flow"
+    }
+    $shared = @($script:SetupFunctions | Where-Object { $_.Name -eq 'Invoke-IntuneAppBulkDeleteSheet' })[0].Extent.Text
+    Assert-True ($shared.Contains('Devices keep the installed application.')) 'the confirmation says devices keep the application'
+    Assert-True ($shared.Contains('Get-PDIntuneWindowsApps') -and $shared.Contains('Invoke-PDWindowsAppBulkDelete')) 'the app kind lists and deletes Windows apps'
+    Assert-True ($shared.Contains('Get-PDIntunePrinterApps') -and $shared.Contains('Invoke-PDPrinterBulkDelete')) 'the printer kind is unchanged'
 }
 
 # ---------------------------------------------------------------------------

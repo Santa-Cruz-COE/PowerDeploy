@@ -108,6 +108,8 @@ $SvgConverterExeSha256 = '433A7C744CFF561ED64FCF73C7C04E239D7A07AE5F0AADBF1BA847
 $PrinterIntuneHelpersScriptPath = "$RepoRoot\Other_Tools\Printer-Intune_Helpers.ps1"
 # Path to the shared org registry Intune naming (display names, description, file name) (dot-sourced below: functions only)
 $OrgRegistryIntuneHelpersScriptPath = "$RepoRoot\Other_Tools\OrgRegistry-Intune_Helpers.ps1"
+# Path to the org registry scripts API upload (Intune Remediation and Intune Platform Script) (dot-sourced below: functions only)
+$OrgRegistryUploadScriptPath = "$RepoRoot\Other_Tools\Upload-InTuneOrgRegistryScripts.ps1"
 # Path to the bulk printer tools: bulk create from PrinterData.json, bulk delete (dot-sourced below: functions only)
 $PrinterIntuneBulkScriptPath = "$RepoRoot\Other_Tools\Printer-IntuneBulk.ps1"
 # Path to the built-in sheet editor the bulk tools use when no program opens .csv files (dot-sourced below: functions only)
@@ -230,6 +232,34 @@ try {
     $OrgRegistryIntuneHelpersLoadError = $_.Exception.Message
     Write-Host "WARNING: $OrgRegistryIntuneHelpersLoadError" -ForegroundColor Yellow
     Write-Host "WARNING: OrganizationRegistryEntries--InTune-Setup will not work until this is fixed." -ForegroundColor Yellow
+
+}
+
+# The org registry scripts API upload (automatic setup via API and the deletion list in
+# OrganizationRegistryEntries--InTune-Setup). Optional like the app uploader: a problem here only
+# disables those two options, which say why; the guided manual steps keep working.
+$OrgRegistryUploadLoadError = $null
+
+try {
+
+    if ($GraphUploadLoadError) {
+        throw "The Intune API is not available on this PC: $GraphUploadLoadError"
+    }
+    if ($OrgRegistryIntuneHelpersLoadError) {
+        throw $OrgRegistryIntuneHelpersLoadError
+    }
+    if (-not (Test-Path -LiteralPath $OrgRegistryUploadScriptPath)) {
+        throw "The org registry scripts uploader was not found at $OrgRegistryUploadScriptPath"
+    }
+    . $OrgRegistryUploadScriptPath
+
+    if (-not (Get-Command -Name 'Invoke-PDOrgRegistryUpload' -CommandType Function -ErrorAction SilentlyContinue)) {
+        throw "Upload-InTuneOrgRegistryScripts.ps1 loaded without defining Invoke-PDOrgRegistryUpload; it may be from a different version."
+    }
+
+} Catch {
+
+    $OrgRegistryUploadLoadError = $_.Exception.Message
 
 }
 
@@ -1100,17 +1130,20 @@ Write-LogBlock "`n$PotentialPrinterInTuneName`n"
 
 Function Test-PrinterBulkReady {
 
-    # Shared preconditions for both bulk tools. Returns $true when the tool can run.
+    # Shared preconditions for the bulk tools (printers and Windows apps). Returns $true when the
+    # tool can run. -ToolName starts every message.
+    param([string]$ToolName = 'The bulk printer tools')
+
     if ($PrinterIntuneHelpersLoadError) {
-        Write-Log "The bulk printer tools cannot run: $PrinterIntuneHelpersLoadError" 'ERROR'
+        Write-Log "$ToolName cannot run: $PrinterIntuneHelpersLoadError" 'ERROR'
         return $false
     }
     if ($PrinterIntuneBulkLoadError) {
-        Write-Log "The bulk printer tools cannot run: $PrinterIntuneBulkLoadError" 'ERROR'
+        Write-Log "$ToolName cannot run: $PrinterIntuneBulkLoadError" 'ERROR'
         return $false
     }
     if (-not $GraphUploadAvailable) {
-        Write-Log "The bulk printer tools use the Intune API, which is not available on this workstation: $GraphUploadLoadError" 'ERROR'
+        Write-Log "$ToolName cannot run: the Intune API is not available on this PC ($GraphUploadLoadError)." 'ERROR'
         return $false
     }
 
@@ -1118,7 +1151,7 @@ Function Test-PrinterBulkReady {
     # or failed renewal means the tool cannot run, as with no usable credential.
     if (-not (Confirm-GraphUploadSecretFresh)) {
         Write-Log ""
-        Write-Log "The bulk printer tools need a usable upload credential. It is set up and rotated from the main menu with InTuneAPI--Setup-and-Manage." 'WARNING'
+        Write-Log "$ToolName cannot run without a usable client secret. The client secret is set up and rotated with InTuneAPI--Setup-and-Manage." 'WARNING'
         return $false
     }
 
@@ -1130,7 +1163,7 @@ Function Test-PrinterBulkReady {
     } Catch {
         Show-GraphUploadError -Failure $_
         Write-Log ""
-        Write-Log "The upload credential is set up from the main menu with InTuneAPI--Setup-and-Manage." 'WARNING'
+        Write-Log "The client secret is set up and rotated with InTuneAPI--Setup-and-Manage." 'WARNING'
         return $false
     }
 
@@ -1162,7 +1195,7 @@ Function Wait-PrinterBulkSheet {
 Function Edit-PrinterBulkSheet {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][ValidateSet('Create', 'Delete')][string]$Kind,
+        [Parameter(Mandatory = $true)][ValidateSet('Create', 'Delete', 'DeleteApps')][string]$Kind,
         [AllowEmptyCollection()][string[]]$Problems = @()
     )
 
@@ -1232,12 +1265,18 @@ Function Edit-PrinterBulkSheet {
             $Editable = @('RequiredGroups', 'AvailableGroups')
             $Flags    = @('Include')
             $Title    = 'PowerDeploy - Bulk create printers'
-        } else {
+        } elseif ($Kind -eq 'Delete') {
             $Instructions = "Tick Delete for every printer app to delete from Intune. Grey columns are for reference only.`r`n" +
                             "Devices that already have a printer keep it; this only cleans up Intune."
             $Editable = @()
             $Flags    = @('Delete')
             $Title    = 'PowerDeploy - Bulk delete printer apps'
+        } else {
+            $Instructions = "Tick Delete for every Windows app to delete from Intune. Grey columns are for reference only.`r`n" +
+                            "Devices that already have the application keep it; this only cleans up Intune."
+            $Editable = @()
+            $Flags    = @('Delete')
+            $Title    = 'PowerDeploy - Bulk delete Windows apps'
         }
 
         Write-Log ""
@@ -1658,27 +1697,63 @@ Function Printer--InTune-BulkCreate {
     Pause
 }
 
-Function Printer--InTune-BulkDelete {
+Function Invoke-IntuneAppBulkDeleteSheet {
 
-    Write-Log "==========================================================================================="
-    Write-Log "SCRIPT: $LocalFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START"
-    Write-Log "==========================================================================================="
+    # The bulk delete sheet flow shared by Printer--InTune-BulkDelete and WindowsApp--InTune-BulkDelete:
+    # list -> delete.csv (mark rows) -> match by AppId against a fresh list -> typed confirmation ->
+    # back up (app JSON + assignments) and delete each app, continuing past failures.
+    param([Parameter(Mandatory = $true)][ValidateSet('Printer', 'WindowsApp')][string]$Kind)
+
+    if ($Kind -eq 'Printer') {
+        $Kinds = @{
+            Title        = 'BULK DELETE PRINTER APPS FROM INTUNE'
+            ToolName     = 'The bulk printer tools'
+            Intro        = @('Lists every PowerDeploy printer app in Intune (all deploy modes) in a sheet. You mark the', 'ones to delete; each one is backed up to a file and then deleted.')
+            Keeps        = 'This only cleans up Intune. Devices that already have a printer KEEP it.'
+            Reading      = 'Reading the printer apps from Intune...'
+            NoneFound    = 'No PowerDeploy printer apps were found in Intune.'
+            Found        = 'Found {0} printer app(s):'
+            DevicesKeep  = 'Devices keep their printers.'
+            Folder       = 'PrinterBulk'
+            SheetKind    = 'Delete'
+            Columns      = $script:PDBulk.DeleteColumns
+            ResultColumns = $script:PDBulk.DeleteResultColumns
+            List         = { param($Auth) Get-PDIntunePrinterApps -AuthContext $Auth }
+            Delete       = { param($Apps, $Folder, $Auth, $Progress) Invoke-PDPrinterBulkDelete -Apps $Apps -BackupFolder $Folder -AuthContext $Auth -OnProgress $Progress }
+        }
+    } else {
+        $Kinds = @{
+            Title        = 'BULK DELETE WINDOWS APPS FROM INTUNE'
+            ToolName     = 'WindowsApp--InTune-BulkDelete'
+            Intro        = @('Lists every PowerDeploy Windows app in Intune (every Win32 app whose name starts with "APP: ", all deploy modes)', 'in a sheet. You mark the ones to delete; each one is backed up to a file and then deleted.')
+            Keeps        = 'This only cleans up Intune. Devices that already have an application KEEP it installed.'
+            Reading      = 'Reading the Windows apps from Intune...'
+            NoneFound    = 'No PowerDeploy Windows apps were found in Intune.'
+            Found        = 'Found {0} Windows app(s):'
+            DevicesKeep  = 'Devices keep the installed application.'
+            Folder       = 'AppBulk'
+            SheetKind    = 'DeleteApps'
+            Columns      = $script:PDBulk.AppDeleteColumns
+            ResultColumns = $script:PDBulk.AppDeleteResultColumns
+            List         = { param($Auth) Get-PDIntuneWindowsApps -AuthContext $Auth }
+            Delete       = { param($Apps, $Folder, $Auth, $Progress) Invoke-PDWindowsAppBulkDelete -Apps $Apps -BackupFolder $Folder -AuthContext $Auth -OnProgress $Progress }
+        }
+    }
+
+    Write-Log $Kinds.Title
     Write-Log ""
-    Write-Log "BULK DELETE PRINTER APPS FROM INTUNE"
+    foreach ($Line in @($Kinds.Intro)) { Write-Log $Line }
     Write-Log ""
-    Write-Log "Lists every PowerDeploy printer app in Intune (all deployment modes) in a sheet. You mark the"
-    Write-Log "ones to delete; each one is backed up to a file and then deleted."
-    Write-Log ""
-    Write-Log "This only cleans up Intune. Devices that already have a printer KEEP it." 'WARNING'
+    Write-Log $Kinds.Keeps 'WARNING'
     Write-Log ""
 
-    if (-not (Test-PrinterBulkReady)) { Pause; return }
+    if (-not (Test-PrinterBulkReady -ToolName $Kinds.ToolName)) { Pause; return }
 
     $AuthContext = @{ Credential = (Get-PDGraphCredential) }
 
-    Write-Log "Reading the printer apps from Intune..."
+    Write-Log $Kinds.Reading
     try {
-        $Apps = @(Get-PDIntunePrinterApps -AuthContext $AuthContext)
+        $Apps = @(& $Kinds.List $AuthContext)
     } Catch {
         Show-GraphUploadError -Failure $_
         Pause
@@ -1686,18 +1761,18 @@ Function Printer--InTune-BulkDelete {
     }
 
     if ($Apps.Count -eq 0) {
-        Write-Log "No PowerDeploy printer apps were found in Intune." 'WARNING'
+        Write-Log $Kinds.NoneFound 'WARNING'
         Pause
         return
     }
 
-    Write-Log ("Found {0} printer app(s):" -f $Apps.Count) 'SUCCESS'
+    Write-Log ($Kinds.Found -f $Apps.Count) 'SUCCESS'
     foreach ($Group in @($Apps | Group-Object DeployMode | Sort-Object Name)) { Write-Log ("     {0,-22} {1}" -f $Group.Name, $Group.Count) }
     Write-Log ""
 
-    $RunFolder = Join-Path $WorkingDirectory ("TEMP\PrinterBulk\Delete_" + (Get-Date -Format 'yyyyMMdd_HHmmss'))
+    $RunFolder = Join-Path $WorkingDirectory ("TEMP\{0}\Delete_{1}" -f $Kinds.Folder, (Get-Date -Format 'yyyyMMdd_HHmmss'))
     $SheetPath = Join-Path $RunFolder 'delete.csv'
-    Write-PDBulkCsv -Rows (New-PDPrinterDeleteSheet -Apps $Apps) -Columns $script:PDBulk.DeleteColumns -Path $SheetPath
+    Write-PDBulkCsv -Rows (New-PDIntuneAppDeleteSheet -Apps $Apps -Columns $Kinds.Columns) -Columns $Kinds.Columns -Path $SheetPath
 
     Write-Log "HOW TO EDIT THE SHEET:" 'WARNING'
     Write-Log "     - Put Y in the Delete column of every app to delete. Leave it blank to keep the app."
@@ -1707,7 +1782,7 @@ Function Printer--InTune-BulkDelete {
 
     While ($true) {
 
-        if (-not (Edit-PrinterBulkSheet -Path $SheetPath -Kind 'Delete' -Problems $LastProblems)) { Write-Log "Cancelled. Nothing was deleted." 'WARNING'; Pause; return }
+        if (-not (Edit-PrinterBulkSheet -Path $SheetPath -Kind $Kinds.SheetKind -Problems $LastProblems)) { Write-Log "Cancelled. Nothing was deleted." 'WARNING'; Pause; return }
         $LastProblems = @()
 
         try {
@@ -1720,7 +1795,7 @@ Function Printer--InTune-BulkDelete {
 
         # A fresh list, so an app deleted or renamed since the sheet was written is caught here.
         try {
-            $Current = @(Get-PDIntunePrinterApps -AuthContext $AuthContext)
+            $Current = @(& $Kinds.List $AuthContext)
         } Catch {
             Show-GraphUploadError -Failure $_
             if (Read-GraphUploadYesNo -Question 'Try again?' -Default $true -Note 'Answer n to cancel. Nothing has been deleted.') { continue }
@@ -1728,7 +1803,7 @@ Function Printer--InTune-BulkDelete {
             return
         }
 
-        $Selection = Resolve-PDPrinterDeleteSelection -Rows $Rows -CurrentApps $Current
+        $Selection = Resolve-PDIntuneAppDeleteSelection -Rows $Rows -CurrentApps $Current
 
         if (@($Selection.Errors).Count -gt 0) {
             Write-Log "The sheet has problems. Nothing has been deleted:" 'ERROR'
@@ -1761,7 +1836,7 @@ Function Printer--InTune-BulkDelete {
     Write-Log ""
     foreach ($App in $ToDelete) { Write-Log ("     {0}  ({1})" -f $App.DisplayName, $App.AppId) }
     Write-Log ""
-    Write-Log ("{0} app(s) will be backed up and then DELETED from Intune. Devices keep their printers." -f $ToDelete.Count) 'WARNING'
+    Write-Log ("{0} app(s) will be backed up and then DELETED from Intune. {1}" -f $ToDelete.Count, $Kinds.DevicesKeep) 'WARNING'
     Write-Log ""
 
     $Typed = ([string](Read-Host ("Type {0} (the number of apps) to delete them, or anything else to cancel" -f $ToDelete.Count))).Trim()
@@ -1770,8 +1845,7 @@ Function Printer--InTune-BulkDelete {
     $BackupFolder = Join-Path $RunFolder 'backups'
     Write-Log ""
 
-    $Results = @(Invoke-PDPrinterBulkDelete -Apps $ToDelete -BackupFolder $BackupFolder -AuthContext $AuthContext `
-        -OnProgress {
+    $Results = @(& $Kinds.Delete $ToDelete $BackupFolder $AuthContext {
             param($Index, $Total, $Row)
             $Level = 'SUCCESS'
             if (@('Deleted', 'AlreadyGone') -notcontains $Row.Result) { $Level = 'ERROR' }
@@ -1779,7 +1853,7 @@ Function Printer--InTune-BulkDelete {
         })
 
     $ResultsPath = Join-Path $RunFolder 'delete-results.csv'
-    Write-PDBulkCsv -Rows $Results -Columns $script:PDBulk.DeleteResultColumns -Path $ResultsPath
+    Write-PDBulkCsv -Rows $Results -Columns $Kinds.ResultColumns -Path $ResultsPath
 
     Write-Log ""
     Write-Log "==========================================================================================="
@@ -1800,6 +1874,26 @@ Function Printer--InTune-BulkDelete {
     Write-Log "Backups (one JSON file per app, including its group assignments):"
     Write-LogBlock "`n$BackupFolder`n"
     Pause
+}
+
+Function Printer--InTune-BulkDelete {
+
+    Write-Log "==========================================================================================="
+    Write-Log "SCRIPT: $LocalFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START"
+    Write-Log "==========================================================================================="
+    Write-Log ""
+
+    Invoke-IntuneAppBulkDeleteSheet -Kind 'Printer'
+}
+
+Function WindowsApp--InTune-BulkDelete {
+
+    Write-Log "==========================================================================================="
+    Write-Log "SCRIPT: $LocalFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START"
+    Write-Log "==========================================================================================="
+    Write-Log ""
+
+    Invoke-IntuneAppBulkDeleteSheet -Kind 'WindowsApp'
 }
 
 
@@ -4803,24 +4897,733 @@ Function Read-OrgRegistryEntryValues {
     return $Values
 }
 
-# DONE 1/14/26 - Thoroughly tested
+# ---------------------------------------------------------------------------
+# OrganizationRegistryEntries--InTune-Setup helpers. No name here contains "--" (the menu is built
+# from functions whose names do). None of them calls exit.
+# ---------------------------------------------------------------------------
+
+Function Read-OrgRegistryMenuChoice {
+    param([Parameter(Mandatory = $true)][string[]]$Choices)
+
+    $Shown = $Choices -join ', '
+    if ($Choices.Count -gt 1) { $Shown = (($Choices[0..($Choices.Count - 2)]) -join ', ') + ' or ' + $Choices[-1] }
+
+    While ($true) {
+        $Choice = ([string](Read-Host ($Choices -join '/'))).Trim()
+        if ($Choices -contains $Choice) { return $Choice }
+        Write-Log "Invalid input. Please enter $Shown." 'ERROR'
+    }
+}
+
+Function Read-OrgRegistryYesNo {
+    # y or n with no default: the create/update questions have no safe default.
+    param([Parameter(Mandatory = $true)][string]$Question)
+
+    Write-Log $Question 'WARNING'
+    While ($true) {
+        $Answer = ([string](Read-Host "(y/n)")).Trim().ToLowerInvariant()
+        if ($Answer -eq 'y') { return $true }
+        if ($Answer -eq 'n') { return $false }
+        Write-Log "Invalid input. Please enter 'y' for yes or 'n' for no." 'ERROR'
+    }
+}
+
+Function Write-OrgRegistryDescriptionLines {
+    param([AllowNull()][string]$Description, [string]$Indent = '        ')
+    foreach ($DescriptionLine in ($Description -split "`n")) { Write-Log "$Indent$DescriptionLine" }
+}
+
+Function Show-OrgRegistryGuidedRemediation {
+    param(
+        [Parameter(Mandatory = $true)][string]$DetectScript,
+        [Parameter(Mandatory = $true)][string]$RemediationScript,
+        [Parameter(Mandatory = $true)][string]$DisplayName,
+        [Parameter(Mandatory = $true)][string]$ExistingName,
+        [Parameter(Mandatory = $true)][string]$Description,
+        [Parameter(Mandatory = $true)][string]$DeployMode
+    )
+
+    Clear
+    Write-Log ""
+    Write-Log "==========================================================================================="
+    Write-Log "UPLOAD REGISTRY REMEDIATION TO INTUNE"
+    Write-Log "==========================================================================================="
+    Write-Log ""
+    Write-Log "The Intune Remediation keeps the registry values current on every assigned device. It runs every hour, so new SAS keys reach devices without any other step."
+    Write-Log ""
+    Write-Log "Detection script file:   $DetectScript"
+    Write-Log "Remediation script file: $RemediationScript"
+    Write-Log ""
+    Write-Log "1. In the Intune admin center, go to Devices > Scripts and remediations, then select the Remediations tab."
+    Write-Log "   Direct link: https://intune.microsoft.com/#view/Microsoft_Intune_DeviceSettings/DevicesWindowsMenu/~/powershell"
+    Write-Log ""
+    Write-Log "2. Look for the Intune Remediation for this deploy mode ($DeployMode): ""$ExistingName"""
+    Write-Log "   PowerDeploy only recognizes an Intune Remediation created before this version once it is renamed to that name."
+    Write-Log ""
+    Write-Log "Keep only one registry Intune Remediation per deploy mode. Once the new one is confirmed working, delete any copy it replaces." 'WARNING'
+    Write-Log ""
+
+    if (Read-OrgRegistryYesNo -Question "Do you need to create a new Intune Remediation for this deploy mode ($DeployMode)?") {
+
+        Write-Log ""
+        Write-Log "To create the Intune Remediation:"
+        Write-Log ""
+        Write-Log "   1. Click ""Create""."
+        Write-Log ""
+        Write-Log "   2. Name: ""$DisplayName"""
+        Write-Log ""
+        Write-Log "   3. Description (copy all lines):"
+        Write-OrgRegistryDescriptionLines -Description $Description
+        Write-Log ""
+        Write-Log "   4. Publisher: ""PowerDeploy"""
+        Write-Log ""
+        Write-Log "   5. Click Next."
+        Write-Log ""
+        Write-Log "   6. For ""Detection script file"", select: $DetectScript"
+        Write-Log ""
+        Write-Log "   7. For ""Remediation script file"", select: $RemediationScript"
+        Write-Log ""
+        Write-Log "   8. For ""Run this script using the logged on credentials"", select: No"
+        Write-Log ""
+        Write-Log "   9. For ""Enforce script signature check"", select: No"
+        Write-Log ""
+        Write-Log "  10. For ""Run script in 64-bit PowerShell"", select: Yes"
+        Write-Log ""
+        Write-Log "  11. Click Next to go to the Scope tags page. Add scope tags if the tenant uses them."
+        Write-Log ""
+        Write-Log "  12. Click Next to go to the Assignments page. Assign the groups that should receive the registry values. Start with a small test group of devices, then add more groups once it is confirmed working."
+        Write-Log ""
+        Write-Log "  13. For each assigned group, click its schedule (""Daily"" by default) and set Frequency = Hourly, Repeats every = 1 hour. Click Apply."
+        Write-Log ""
+        Write-Log "  14. Click Next, then ""Create""."
+        Write-Log ""
+
+    } else {
+
+        Write-Log ""
+        Write-Log "To update the existing Intune Remediation, open it, select Properties, and edit each section:"
+        Write-Log ""
+        Write-Log "   1. Basics:"
+        Write-Log "        Name: ""$DisplayName"""
+        Write-Log "        Description (copy all lines):"
+        Write-OrgRegistryDescriptionLines -Description $Description -Indent '            '
+        Write-Log "        Publisher: ""PowerDeploy"""
+        Write-Log ""
+        Write-Log "   2. Settings:"
+        Write-Log "        Detection script file: $DetectScript"
+        Write-Log "        Remediation script file: $RemediationScript"
+        Write-Log "        Run this script using the logged on credentials: No"
+        Write-Log "        Enforce script signature check: No"
+        Write-Log "        Run script in 64-bit PowerShell: Yes"
+        Write-Log ""
+        Write-Log "   3. Assignments: check that the schedule of each assigned group is Frequency = Hourly, Repeats every = 1 hour."
+        Write-Log ""
+        Write-Log "   4. Click ""Review + save"", then ""Save""."
+        Write-Log ""
+
+    }
+
+    Pause
+}
+
+Function Show-OrgRegistryGuidedPlatformScript {
+    param(
+        [Parameter(Mandatory = $true)][string]$PlatformScript,
+        [Parameter(Mandatory = $true)][string]$DisplayName,
+        [Parameter(Mandatory = $true)][string]$ExistingName,
+        [Parameter(Mandatory = $true)][string]$Description,
+        [Parameter(Mandatory = $true)][string]$DeployMode
+    )
+
+    Clear
+    Write-Log ""
+    Write-Log "==========================================================================================="
+    Write-Log "UPLOAD REGISTRY PLATFORM SCRIPT TO INTUNE"
+    Write-Log "==========================================================================================="
+    Write-Log ""
+    Write-Log "The Intune Platform Script writes the same registry values as the Intune Remediation. Intune runs Intune Platform Scripts before Win32 apps, so during Autopilot the values are in place before PowerDeploy's apps and printers install. It needs no Git and no network on the device."
+    Write-Log "Keep the Intune Remediation as well: it keeps the values current every hour."
+    Write-Log ""
+    Write-Log "Platform script file: $PlatformScript"
+    Write-Log ""
+    Write-Log "1. In the Intune admin center, go to Devices > Scripts and remediations, then select the Platform scripts tab."
+    Write-Log "   Direct link: https://intune.microsoft.com/#view/Microsoft_Intune_DeviceSettings/DevicesWindowsMenu/~/powershell"
+    Write-Log ""
+    Write-Log "2. Look for the Intune Platform Script for this deploy mode ($DeployMode): ""$ExistingName"""
+    Write-Log "   PowerDeploy only recognizes an Intune Platform Script created before this version once it is renamed to that name."
+    Write-Log ""
+    Write-Log "Keep only one registry Intune Platform Script per deploy mode. If one already exists, update it instead of adding a second one." 'WARNING'
+    Write-Log ""
+
+    if (Read-OrgRegistryYesNo -Question "Do you need to create a new Intune Platform Script for this deploy mode ($DeployMode)?") {
+
+        Write-Log ""
+        Write-Log "To create the Intune Platform Script:"
+        Write-Log ""
+        Write-Log "   1. Click ""Add"", then select ""Windows 10 and later""."
+        Write-Log ""
+        Write-Log "   2. Name: ""$DisplayName"""
+        Write-Log ""
+        Write-Log "   3. Description (copy all lines):"
+        Write-OrgRegistryDescriptionLines -Description $Description
+        Write-Log ""
+        Write-Log "   4. Click Next to go to the Script settings page."
+        Write-Log ""
+        Write-Log "   5. For ""Script location"", select: $PlatformScript"
+        Write-Log ""
+        Write-Log "   6. For ""Run this script using the logged on credentials"", select: No"
+        Write-Log ""
+        Write-Log "   7. For ""Enforce script signature check"", select: No"
+        Write-Log ""
+        Write-Log "   8. For ""Run script in 64-bit PowerShell host"", select: Yes"
+        Write-Log ""
+        Write-Log "   9. Click Next to go to the Scope tags page. Add scope tags if the tenant uses them."
+        Write-Log ""
+        Write-Log "  10. Click Next to go to the Assignments page. Assign it to device groups: only device groups run the Intune Platform Script during the Autopilot device phase, before Win32 apps install. Start with a small test group of devices."
+        Write-Log ""
+        Write-Log "  11. Click Next, then ""Add""."
+        Write-Log ""
+
+    } else {
+
+        Write-Log ""
+        Write-Log "To update the existing Intune Platform Script, open it, select Properties, and edit each section:"
+        Write-Log ""
+        Write-Log "   1. Basics:"
+        Write-Log "        Name: ""$DisplayName"""
+        Write-Log "        Description (copy all lines):"
+        Write-OrgRegistryDescriptionLines -Description $Description -Indent '            '
+        Write-Log ""
+        Write-Log "   2. Script settings:"
+        Write-Log "        Script location: $PlatformScript"
+        Write-Log "        Run this script using the logged on credentials: No"
+        Write-Log "        Enforce script signature check: No"
+        Write-Log "        Run script in 64-bit PowerShell host: Yes"
+        Write-Log ""
+        Write-Log "   3. Assignments: check that it is assigned to device groups. Only device groups run it during the Autopilot device phase."
+        Write-Log ""
+        Write-Log "   4. Click ""Review + save"", then ""Save""."
+        Write-Log ""
+
+    }
+
+    Pause
+}
+
+Function Test-OrgRegistryApiReady {
+    # Whether the Intune API can be offered, without asking anything or touching the network.
+    # { Ready; Reason }.
+    if (-not $GraphUploadAvailable) {
+        return [pscustomobject]@{ Ready = $false; Reason = "the Intune API is not available on this PC ($GraphUploadLoadError)." }
+    }
+    if ($OrgRegistryUploadLoadError) {
+        return [pscustomobject]@{ Ready = $false; Reason = "$OrgRegistryUploadLoadError" }
+    }
+
+    $Stored = $false
+    try { $Stored = [bool](Get-PDGraphCredentialSummary).Stored } Catch { $Stored = $false }
+    if (-not $Stored) {
+        return [pscustomobject]@{ Ready = $false; Reason = "no client secret is stored on this PC. It is set up with InTuneAPI--Setup-and-Manage." }
+    }
+
+    return [pscustomobject]@{ Ready = $true; Reason = '' }
+}
+
+Function Connect-OrgRegistryApi {
+    # The checks before any API call: a stored client secret, the renewal offer
+    # (Confirm-GraphUploadSecretFresh), then the token and its application roles. Returns the
+    # engine's auth object, or $null after saying why.
+    param([Parameter(Mandatory = $true)][string]$Purpose)
+
+    $Ready = Test-OrgRegistryApiReady
+    if (-not $Ready.Ready) {
+        Write-Log "$Purpose is not available: $($Ready.Reason)" 'WARNING'
+        return $null
+    }
+
+    if (-not (Confirm-GraphUploadSecretFresh)) {
+        Write-Log ""
+        Write-Log "$Purpose needs a client secret that has not expired. The client secret is set up and rotated with InTuneAPI--Setup-and-Manage." 'WARNING'
+        return $null
+    }
+
+    try {
+        $Auth = Get-PDOrgRegistryAuthContext
+        foreach ($Warning in @($Auth.Warnings)) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$Warning)) { Write-Log $Warning 'WARNING' }
+        }
+        return $Auth
+    } Catch {
+        Show-GraphUploadError -Failure (Get-PDOrgRegistryErrorText -ErrorRecord $_)
+        Write-Log ""
+        Write-Log "The client secret is set up and rotated with InTuneAPI--Setup-and-Manage." 'WARNING'
+        return $null
+    }
+}
+
+Function Show-OrgRegistryMaaGuidance {
+    # Multi-Admin Approval held a write: the Scripts access policy needs the exclusion. Same steps as
+    # InTuneAPI--Setup-and-Manage > MAA Exclusions (Get-PDGraphUploadMaaGuidance).
+    $Guidance = Get-PDGraphUploadMaaGuidance
+
+    Write-Log ""
+    Write-Log "Multi-Admin Approval (MAA) blocked this change. Add the Azure App Registration to the exclusions of the Scripts access policy, then run this again." 'WARNING'
+    Write-Log "In the Intune admin center:" 'WARNING'
+    foreach ($Step in @($Guidance.Steps)) { Write-Log "  $Step" }
+    Write-Log ""
+}
+
+Function Get-OrgRegistryTypeList {
+    # "the Intune Remediation and the Intune Platform Script", "the Intune Remediation", ... (the order of the menu)
+    param([Parameter(Mandatory = $true)][string[]]$Types)
+
+    $Labels = @()
+    foreach ($Type in @('Remediation', 'PlatformScript')) {
+        if ($Types -contains $Type) { $Labels += ('the ' + (Get-PDOrgRegistryTypeLabel -Type $Type)) }
+    }
+    return ($Labels -join ' and ')
+}
+
+Function Read-OrgRegistryCopyChoice {
+    # Several copies of one object type exist for this deploy mode: the admin picks the one to
+    # update. Returns its id, or $null when cancelled.
+    param(
+        [Parameter(Mandatory = $true)][object]$Entry,
+        [Parameter(Mandatory = $true)][string]$DeployMode
+    )
+
+    $Candidates = @($Entry.Candidates)
+
+    Write-Log ""
+    Write-Log ("There are {0} copies of the {1} for deploy mode {2}. Choose the one to update. The others can be deleted from the list shown after the upload." -f $Candidates.Count, $Entry.TypeLabel, $DeployMode) 'WARNING'
+    Write-Log ""
+    for ($i = 0; $i -lt $Candidates.Count; $i++) {
+        $Candidate = $Candidates[$i]
+        Write-Log ("     {0}. {1}" -f ($i + 1), $Candidate.DisplayName)
+        Write-Log ("        ID: {0} | Last modified: {1}" -f $Candidate.Id, $Candidate.LastModified)
+        Write-Log ("        Groups: {0}" -f (@($Candidate.AssignmentLines) -join '; '))
+    }
+    Write-Log ""
+
+    While ($true) {
+        $Answer = ([string](Read-Host "Number of the copy to update (or exit)")).Trim()
+        if ($Answer -ieq 'exit') { return $null }
+        $Number = 0
+        if ([int]::TryParse($Answer, [ref]$Number) -and $Number -ge 1 -and $Number -le $Candidates.Count) { return [string]$Candidates[$Number - 1].Id }
+        Write-Log "Enter a number from the list, or exit." 'ERROR'
+    }
+}
+
+Function Read-OrgRegistryAssignment {
+    # One group prompt for every object in the plan. Returns { Cancelled; Keep; Targets; Lines }.
+    param(
+        [Parameter(Mandatory = $true)][object]$Plan,
+        [Parameter(Mandatory = $true)][object]$KeepOption,
+        [AllowNull()][object]$AuthContext
+    )
+
+    $Types = @($Plan.Entries | ForEach-Object { [string]$_.Type })
+    $FirstType = $Types[0]
+
+    While ($true) {
+
+        Write-Log ""
+        if ($KeepOption.Available) {
+            Write-Log "Current assignments:"
+            foreach ($Line in @(Get-PDOrgRegistryAssignmentLines -Type $FirstType -Assignments @($KeepOption.Assignments) -AuthContext $AuthContext)) { Write-Log "     $Line" }
+            Write-Log ""
+        } elseif (-not [string]::IsNullOrWhiteSpace([string]$KeepOption.Reason) -and @($Plan.Entries | Where-Object { $_.Action -eq 'Update' }).Count -gt 0) {
+            Write-Log $KeepOption.Reason
+        }
+
+        $Note = @()
+        if ($Types -contains 'PlatformScript') { $Note += "Only device groups run the Intune Platform Script during the Autopilot device phase." }
+        if ($KeepOption.Available) { $Note += "Press Enter to keep the current assignments, or type exit to cancel." }
+        else { $Note += "Type exit to cancel." }
+
+        $Prompt = ("Enter the groups to assign {0} to, separated by ';' (for example: Test Devices; Lab Devices). Use exact group names or object IDs, or /AllDevices or /AllUsers for Intune's built-in targets." -f (Get-OrgRegistryTypeList -Types $Types))
+        [string[]]$Terms = @(Read-IntuneGroupList -Intent 'Groups' -Prompt $Prompt -Note $Note)
+
+        if ($Terms.Count -eq 1 -and $Terms[0] -ieq 'exit') {
+            return [pscustomobject]@{ Cancelled = $true; Keep = $false; Targets = @(); Lines = @() }
+        }
+
+        if ($Terms.Count -eq 0) {
+            if ($KeepOption.Available) {
+                $Lines = @(Get-PDOrgRegistryAssignmentLines -Type $FirstType -Assignments @($KeepOption.Assignments) -AuthContext $AuthContext)
+                $Targets = @(@($KeepOption.Assignments) | ForEach-Object { Get-PDGraphPropertyValue -Object $_ -Name 'target' })
+                return [pscustomobject]@{ Cancelled = $false; Keep = $true; Targets = $Targets; Lines = $Lines }
+            }
+            Write-Log "Enter at least one group." 'ERROR'
+            continue
+        }
+
+        try {
+            $Resolved = @(Resolve-PDGraphGroups -RequiredGroups $Terms -AuthContext $AuthContext -Stage 'Groups')
+            $Targets = @(ConvertTo-PDOrgRegistryTargets -ResolvedGroups $Resolved)
+        } Catch {
+            Show-GraphUploadError -Failure (Get-PDOrgRegistryErrorText -ErrorRecord $_)
+            continue
+        }
+
+        $Lines = @()
+        foreach ($Group in $Resolved) {
+            if (([string]$Group.Id).StartsWith('/')) { $Lines += [string]$Group.DisplayName } else { $Lines += ('{0} ({1})' -f $Group.DisplayName, $Group.Id) }
+        }
+        return [pscustomobject]@{ Cancelled = $false; Keep = $false; Targets = $Targets; Lines = $Lines }
+    }
+}
+
+Function Show-OrgRegistryUploadReview {
+    param(
+        [Parameter(Mandatory = $true)][object]$Plan,
+        [Parameter(Mandatory = $true)][hashtable]$Metadata,
+        [Parameter(Mandatory = $true)][object]$Assignment,
+        [AllowNull()][object]$Auth
+    )
+
+    Write-Log ""
+    Write-Log "==========================================================================================="
+    Write-Log "REVIEW - nothing has been changed in Intune yet"
+    Write-Log "==========================================================================================="
+
+    foreach ($Entry in @($Plan.Entries)) {
+        $Meta = $Metadata[$Entry.Type]
+
+        Write-Log ""
+        Write-Log ($Entry.TypeLabel.ToUpperInvariant())
+        if ($Entry.Action -eq 'Create') {
+            Write-Log ("     Action:    Create a new {0}" -f $Entry.TypeLabel)
+            Write-Log "     ID:        (assigned by Intune when it is created)"
+        } else {
+            Write-Log ("     Action:    Update the existing {0}" -f $Entry.TypeLabel)
+            Write-Log ("     ID:        {0}" -f $Entry.Target.Id)
+            if ([string]$Entry.Target.DisplayName -cne [string]$Meta.DisplayName) { Write-Log ("     Old name:  {0}" -f $Entry.Target.DisplayName) }
+        }
+        Write-Log ("     Name:      {0}" -f $Meta.DisplayName)
+        if ($Entry.Type -eq 'PlatformScript') {
+            Write-Log ("     File name: {0}" -f $Meta.FileName)
+        } else {
+            Write-Log ("     Publisher: {0}" -f $script:PDOrgRegistryGraph.Publisher)
+        }
+
+        if ($Assignment.Keep) {
+            $Lines = @(Get-PDOrgRegistryAssignmentLines -Type $Entry.Type -Assignments @($Entry.Target.Assignments) -AuthContext $Auth.AuthContext)
+        } else {
+            $Lines = @($Assignment.Lines)
+        }
+        Write-Log ("     Groups:    {0}" -f $Lines[0])
+        foreach ($Line in @($Lines | Select-Object -Skip 1)) { Write-Log ("                {0}" -f $Line) }
+
+        if ($Entry.Type -eq 'Remediation') {
+            if ($Assignment.Keep) { Write-Log "     Schedule:  unchanged (shown with each group)" }
+            else { Write-Log ("     Schedule:  Hourly, every {0} hour, for each group" -f $script:PDOrgRegistryGraph.HourlyInterval) }
+        }
+        Write-Log "     Settings:  runs as System (logged on credentials: No), signature check: No, 64-bit PowerShell: Yes"
+    }
+
+    Write-Log ""
+    if ($null -ne $Auth -and $null -ne $Auth.SecretExpiresOn) {
+        Write-Log ("Client secret expires: {0} ({1} left)" -f (Format-PDGraphExpiry -ExpiresOn $Auth.SecretExpiresOn), (Format-PDGraphTimeRemaining -ExpiresOn $Auth.SecretExpiresOn)) 'INFO2'
+    }
+    Write-Log ""
+}
+
+Function Invoke-OrgRegistryIntuneDeletionList {
+    # The deletion list (every registry script in Intune, all deploy modes). Objects just uploaded
+    # are listed and cannot be selected. Nothing is pre-selected and no backup file is written: each
+    # object's name, ID and assignments go to the Setup log before it is deleted.
+    param(
+        [AllowNull()][object]$AuthContext,
+        [AllowEmptyCollection()][string[]]$JustUploadedIds = @()
+    )
+
+    $EngineLog = { param($Message, $Level) Write-Log $Message $Level -LogOnly }
+
+    Write-Log ""
+    Write-Log "==========================================================================================="
+    Write-Log "REGISTRY SCRIPTS IN INTUNE"
+    Write-Log "==========================================================================================="
+    Write-Log ""
+    Write-Log "Reading the registry scripts in Intune..."
+
+    try {
+        $Inventory = @(Get-PDOrgRegistryIntuneObjects -AuthContext $AuthContext)
+    } Catch {
+        Show-GraphUploadError -Failure (Get-PDOrgRegistryErrorText -ErrorRecord $_)
+        Write-Log "Nothing was deleted." 'WARNING'
+        return
+    }
+
+    $List = @(Get-PDOrgRegistryDeletionList -Inventory $Inventory -JustUploadedIds $JustUploadedIds)
+
+    Write-Log ""
+    Write-Log "Every Intune Remediation and Intune Platform Script whose name starts with ""POWERDEPLOY ORG REGISTRY:"", in all deploy modes."
+    Write-Log "Objects created before this version of PowerDeploy are only listed once they are renamed to the PowerDeploy name."
+    Write-Log ""
+
+    if ($List.Count -eq 0) {
+        Write-Log "There are none in Intune." 'WARNING'
+        return
+    }
+
+    foreach ($Item in $List) {
+        $Mark = ''
+        if ($Item.JustUploaded) { $Mark = ' (just uploaded)' }
+        Write-Log ("{0,3}. {1}: {2}{3}" -f $Item.Number, $Item.TypeLabel, $Item.DisplayName, $Mark)
+        Write-Log ("     Deploy mode: {0} | Commit: {1} | Last modified: {2}" -f $Item.DeployMode, $Item.Commit, $Item.LastModified)
+        Write-Log ("     ID: {0}" -f $Item.Id)
+        Write-Log ("     Groups: {0}" -f (@($Item.AssignmentLines) -join '; '))
+    }
+    Write-Log ""
+
+    if (@($List | Where-Object { $_.Selectable }).Count -eq 0) {
+        Write-Log "Only the objects just uploaded are in Intune, so there is nothing to delete."
+        return
+    }
+
+    While ($true) {
+        Write-Log "Enter the numbers to delete, separated by commas, or press Enter to delete nothing." 'WARNING'
+        $Answer = [string](Read-Host "Numbers")
+        $Selection = ConvertFrom-PDOrgRegistryDeletionSelection -Text $Answer -List $List
+        if (@($Selection.Errors).Count -gt 0) {
+            foreach ($Problem in @($Selection.Errors)) { Write-Log $Problem 'ERROR' }
+            continue
+        }
+        break
+    }
+
+    $Selected = @($Selection.Selected)
+    if ($Selected.Count -eq 0) {
+        Write-Log "Nothing was deleted."
+        return
+    }
+
+    Write-Log ""
+    Write-Log "These will be deleted from Intune:" 'WARNING'
+    foreach ($Item in $Selected) { Write-Log ("     {0}. {1}: {2} ({3})" -f $Item.Number, $Item.TypeLabel, $Item.DisplayName, $Item.Id) }
+    Write-Log "Deleting them does not remove the registry values from devices."
+    Write-Log ""
+
+    if (-not (Read-GraphUploadYesNo -Question ("Delete {0} object(s) from Intune now?" -f $Selected.Count) -Default $false)) {
+        Write-Log "Nothing was deleted."
+        return
+    }
+
+    Write-Log ""
+    $Blocked = $false
+    $Deleted = 0
+    foreach ($Item in $Selected) {
+        $Outcome = Remove-PDOrgRegistryIntuneObject -AuthContext $AuthContext -Entry $Item -Log $EngineLog
+        switch ([string]$Outcome.Result) {
+            'Deleted'     { Write-Log ("Deleted: {0} ({1})" -f $Item.DisplayName, $Item.Id) 'SUCCESS'; $Deleted++ }
+            'AlreadyGone' { Write-Log ("Already gone from Intune: {0} ({1})" -f $Item.DisplayName, $Item.Id) 'WARNING' }
+            default {
+                Write-Log ("Not deleted: {0} ({1}). {2}" -f $Item.DisplayName, $Item.Id, $Outcome.Message) 'ERROR'
+                if ($Outcome.ApprovalRequired) { $Blocked = $true }
+            }
+        }
+    }
+    if ($Blocked) { Show-OrgRegistryMaaGuidance }
+    if ($Deleted -gt 0) { Write-Log "The Setup log records the name, ID and assignments of each object before it was deleted: $LogPath" }
+}
+
+Function Invoke-OrgRegistryIntuneDeletion {
+    # The first question's "View and delete existing registry scripts in Intune": no deploy mode
+    # and no values, only the deletion list.
+    Clear
+
+    $Auth = Connect-OrgRegistryApi -Purpose 'Viewing and deleting registry scripts in Intune'
+    if ($null -eq $Auth) { Pause; return }
+
+    Invoke-OrgRegistryIntuneDeletionList -AuthContext $Auth.AuthContext -JustUploadedIds @()
+    Write-Log ""
+    Pause
+}
+
+Function Invoke-OrgRegistryIntuneAutoUpload {
+    <#
+        Automatic setup via API for the objects in scope (Other_Tools\Upload-InTuneOrgRegistryScripts.ps1
+        does the Graph work). Returns { Reason; Pending }: Pending lists the object types that were not
+        set up and verified. Reason is NotReady when the API could not be used at all (the caller then
+        goes straight to the guided manual steps); otherwise the caller offers them.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Types,
+        [Parameter(Mandatory = $true)][string]$DeployMode,
+        [Parameter(Mandatory = $true)][hashtable]$Files,
+        [Parameter(Mandatory = $true)][hashtable]$Metadata,
+        # The exact secret values the scripts were generated from. Removed from every message and log
+        # line of the engine for this run (Set-PDOrgRegistryRedactValues); never logged.
+        [AllowEmptyCollection()][object[]]$RedactValues = @()
+    )
+
+    $Outcome = [pscustomobject]@{ Reason = 'NotReady'; Pending = @($Types) }
+    $EngineLog = { param($Message, $Level) Write-Log $Message $Level -LogOnly }
+
+    Clear
+    Write-Log "==========================================================================================="
+    Write-Log "AUTOMATIC SETUP VIA API"
+    Write-Log "==========================================================================================="
+    Write-Log ""
+
+    $Auth = Connect-OrgRegistryApi -Purpose 'Automatic setup via API'
+    if ($null -eq $Auth) { return $Outcome }
+
+    $Outcome.Reason = 'Stopped'
+    $Writing = $false
+    Set-PDOrgRegistryRedactValues -Values $RedactValues
+
+    try {
+
+        Write-Log "Reading the registry scripts in Intune..."
+        $Inventory = @(Get-PDOrgRegistryIntuneObjects -AuthContext $Auth.AuthContext)
+        $Plan = New-PDOrgRegistryUploadPlan -Inventory $Inventory -Types $Types -DeployMode $DeployMode
+
+        if ($Plan.NeedsChoice) {
+            $SelectedIds = @{}
+            foreach ($Entry in @($Plan.Entries | Where-Object { $_.Action -eq 'Choose' })) {
+                $Pick = Read-OrgRegistryCopyChoice -Entry $Entry -DeployMode $DeployMode
+                if ([string]::IsNullOrWhiteSpace($Pick)) {
+                    Write-Log "Cancelled. Nothing was changed in Intune." 'WARNING'
+                    return $Outcome
+                }
+                $SelectedIds[$Entry.Type] = $Pick
+            }
+            $Plan = New-PDOrgRegistryUploadPlan -Inventory $Inventory -Types $Types -DeployMode $DeployMode -SelectedIds $SelectedIds
+        }
+
+        Write-Log ""
+        foreach ($Entry in @($Plan.Entries)) {
+            if ($Entry.Action -eq 'Create') {
+                Write-Log ("{0}: none exists for deploy mode {1}, so a new one will be created." -f $Entry.TypeLabel, $DeployMode)
+            } else {
+                Write-Log ("{0}: the existing one will be updated: {1} ({2})" -f $Entry.TypeLabel, $Entry.Target.DisplayName, $Entry.Target.Id)
+            }
+        }
+
+        $KeepOption = Get-PDOrgRegistryKeepOption -Plan $Plan
+
+        # Groups, then the overlap check. Declining the overlap goes back to the groups.
+        While ($true) {
+            $Assignment = Read-OrgRegistryAssignment -Plan $Plan -KeepOption $KeepOption -AuthContext $Auth.AuthContext
+            if ($Assignment.Cancelled) {
+                Write-Log "Cancelled. Nothing was changed in Intune." 'WARNING'
+                return $Outcome
+            }
+
+            $Overlaps = @(Find-PDOrgRegistryAssignmentOverlap -Inventory $Inventory -Plan $Plan -Targets @($Assignment.Targets) -AuthContext $Auth.AuthContext)
+            if ($Overlaps.Count -eq 0) { break }
+
+            Write-Log ""
+            Write-Log "Other registry scripts in Intune are already assigned to a group this upload uses:" 'WARNING'
+            foreach ($Overlap in $Overlaps) {
+                Write-Log ("     {0}: {1}" -f $Overlap.TypeLabel, $Overlap.DisplayName) 'WARNING'
+                Write-Log ("        ID: {0} | Shared group: {1}" -f $Overlap.Id, $Overlap.SharedTarget) 'WARNING'
+            }
+            Write-Log "A device in both groups gets the registry values of whichever script runs last."
+            Write-Log ""
+            if (Read-GraphUploadYesNo -Question 'Continue with these groups?' -Default $false -Note 'Answer n to enter the groups again.') { break }
+        }
+
+        # Fingerprints of the files the review covers; the engine refuses a file that changes after this.
+        $Content = @{}
+        if ($Types -contains 'PlatformScript') { $Content['PlatformScript'] = @{ Script = (Get-PDOrgRegistryFileFingerprint -Path $Files.PlatformScript) } }
+        if ($Types -contains 'Remediation') {
+            $Content['Remediation'] = @{ Detection = (Get-PDOrgRegistryFileFingerprint -Path $Files.DetectScript); Remediation = (Get-PDOrgRegistryFileFingerprint -Path $Files.RemediationScript) }
+        }
+
+        Show-OrgRegistryUploadReview -Plan $Plan -Metadata $Metadata -Assignment $Assignment -Auth $Auth
+
+        if (-not (Read-GraphUploadYesNo -Question 'Make these changes in Intune now?' -Default $false)) {
+            Write-Log "Cancelled. Nothing was changed in Intune." 'WARNING'
+            return $Outcome
+        }
+
+        Write-Log ""
+        Write-Log "Writing to Intune, then reading everything back to check it..."
+        Write-Log ""
+
+        $UploadArguments = @{ AuthContext = $Auth.AuthContext; Plan = $Plan; Metadata = $Metadata; Content = $Content; Log = $EngineLog }
+        if ($Assignment.Keep) { $UploadArguments['KeepAssignments'] = $true } else { $UploadArguments['Targets'] = @($Assignment.Targets) }
+        $Writing = $true
+        $Result = Invoke-PDOrgRegistryUpload @UploadArguments
+
+        foreach ($Object in @($Result.Objects)) {
+            if ($Object.Status -eq 'Verified') {
+                $Done = 'updated'
+                if ($Object.Action -eq 'Create') { $Done = 'created' }
+                Write-Log ("{0} {1}, assigned and verified." -f $Object.TypeLabel, $Done) 'SUCCESS'
+                Write-Log ("     Name: {0}" -f $Object.DisplayName)
+                Write-Log ("     ID: {0}" -f $Object.Id)
+                Write-Log ("     Intune admin center: {0}" -f $Object.PortalUrl)
+            } elseif ($Object.Status -eq 'Failed') {
+                Write-Log ("{0}: the automatic setup failed." -f $Object.TypeLabel) 'ERROR'
+                Show-GraphUploadError -Failure $Object.Message
+            } else {
+                Write-Log ("{0}: {1}" -f $Object.TypeLabel, $Object.Message) 'WARNING'
+            }
+            Write-Log ""
+        }
+
+        if ($Result.ApprovalRequired) { Show-OrgRegistryMaaGuidance }
+
+        $Outcome.Pending = @(@($Result.Objects) | Where-Object { $_.Status -ne 'Verified' } | ForEach-Object { [string]$_.Type })
+
+        if ($Result.Success) {
+            $Outcome.Reason = 'Done'
+            Pause
+            $JustUploaded = @(@($Result.Objects) | ForEach-Object { [string]$_.Id })
+            Invoke-OrgRegistryIntuneDeletionList -AuthContext $Auth.AuthContext -JustUploadedIds $JustUploaded
+            Write-Log ""
+        } else {
+            $Outcome.Reason = 'Failed'
+        }
+
+        return $Outcome
+
+    } Catch {
+
+        Show-GraphUploadError -Failure (Get-PDOrgRegistryErrorText -ErrorRecord $_)
+        if ($Writing) { Write-Log "The results above show what was changed in Intune." 'WARNING' }
+        else { Write-Log "Nothing was changed in Intune." 'WARNING' }
+        return $Outcome
+
+    } Finally {
+
+        Set-PDOrgRegistryRedactValues -Values @()
+
+    }
+}
+
+# DONE 1/14/26 - Thoroughly tested (guided steps). Automatic setup via API and the deletion list added 2026-11.
 Function OrganizationRegistryEntries--InTune-Setup{
 
-    # The Intune Platform Script and Remediation names come from Other_Tools\OrgRegistry-Intune_Helpers.ps1
+    # The Intune Remediation and Intune Platform Script names come from Other_Tools\OrgRegistry-Intune_Helpers.ps1
     if ($OrgRegistryIntuneHelpersLoadError) {
         Write-Log "OrganizationRegistryEntries--InTune-Setup cannot run: $OrgRegistryIntuneHelpersLoadError" "ERROR"
         return
     }
 
-    # Determine if this is a test or production deployment
-    $RepoUrl = Set-URL
     Write-Log "==========================================================================================="
     Write-Log "SCRIPT: $LocalFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | START"
     Write-Log "==========================================================================================="
-
     Write-Log ""
     Write-Log "ORGANIZATION REGISTRY ENTRIES - INTUNE SETUP"
     Write-Log ""
+    Write-Log "What do you want to do?" 'WARNING'
+    Write-Log ""
+    Write-Log "     1 - Generate the registry scripts and set them up in Intune"
+    Write-Log "     2 - View and delete existing registry scripts in Intune"
+    Write-Log ""
+
+    if ((Read-OrgRegistryMenuChoice -Choices @('1', '2')) -eq '2') {
+        Invoke-OrgRegistryIntuneDeletion
+        return
+    }
+
+    # Determine if this is a test or production deployment
+    $RepoUrl = Set-URL
 
     # NOTE: Not currently used - kept for the planned "only pass non-blank values" feature (see the commented
     # $HashTable lines in Read-OrgRegistryEntryValues). $HashTable is never set today, so this would only assign
@@ -4831,7 +5634,7 @@ Function OrganizationRegistryEntries--InTune-Setup{
     [hashtable]$FunctionParams = Read-OrgRegistryEntryValues -Target 'Intune'
 
     Write-Log ""
-    Write-Log "Attempting to generate the registry remediation scripts..."
+    Write-Log "Generating the registry script files for the Intune Remediation..."
     Write-Log ""
 
         [hashtable]$ReturnHash = @{}
@@ -4857,7 +5660,7 @@ Function OrganizationRegistryEntries--InTune-Setup{
             $value = $ReturnHash[$key]
             Write-Log "   $key : $value" "INFO2"
 
-        }    
+        }
 
         Write-Log "Setting values as local variables..." "INFO2"
         foreach ($key in $ReturnHash.Keys) {
@@ -4872,7 +5675,7 @@ Function OrganizationRegistryEntries--InTune-Setup{
     # they are in place before PowerDeploy's Win32 apps install during Autopilot. Intune Remediations do
     # not run during the Enrollment Status Page; Intune Platform Scripts run before Win32 apps.
     Write-Log ""
-    Write-Log "Attempting to generate the registry Intune Platform Script..."
+    Write-Log "Generating the registry script file for the Intune Platform Script..."
     Write-Log ""
 
         # Same values as the remediation scripts, plus the deploy mode for the script's header.
@@ -4888,7 +5691,7 @@ Function OrganizationRegistryEntries--InTune-Setup{
         -FunctionParams $PlatformScriptParams) | Select-Object -Last 1
 
         if ((-not ($PlatformReturn -is [hashtable])) -or [string]::IsNullOrWhiteSpace($PlatformReturn.PlatformScript) -or (-not (Test-Path -LiteralPath $PlatformReturn.PlatformScript))) {
-            Write-Log "The registry Intune Platform Script could not be generated. See the Generator_Logs folder for details." "ERROR"
+            Write-Log "The Intune Platform Script file could not be generated. See the Generator_Logs folder for details." "ERROR"
             return
         }
 
@@ -4903,244 +5706,145 @@ Function OrganizationRegistryEntries--InTune-Setup{
     $RemediationDescription = Get-PDOrgRegistryIntuneDescription -Type Remediation -DeployMode $Global:DeployMode -SourceCommit $RemediationSourceCommit -GeneratedAt $PlatformScriptGeneratedAt
     $PlatformScriptDisplayName = Get-PDOrgRegistryIntuneDisplayName -Type PlatformScript -DeployMode $Global:DeployMode -SourceCommit $PlatformScriptSourceCommit
     $PlatformScriptDescription = Get-PDOrgRegistryIntuneDescription -Type PlatformScript -DeployMode $Global:DeployMode -SourceCommit $PlatformScriptSourceCommit -GeneratedAt $PlatformScriptGeneratedAt
+    $PlatformScriptFileName = Get-PDOrgRegistryPlatformScriptFileName -SourceCommit $PlatformScriptSourceCommit
     # How an existing copy for this deploy mode is named, whatever its [VER: ...]
     $PlatformScriptExistingName = Get-PDOrgRegistryIntuneDisplayName -Type PlatformScript -DeployMode $Global:DeployMode -SourceCommit '...'
     $RemediationExistingName = Get-PDOrgRegistryIntuneDisplayName -Type Remediation -DeployMode $Global:DeployMode -SourceCommit '...'
 
     Clear
     Write-Log ""
-    Write-Log "==========================================================================================="
-    Write-Log "UPLOAD REGISTRY REMEDIATION SCRIPTS TO INTUNE"
-    Write-Log "==========================================================================================="
+    Write-Log "The registry script files have been created." "SUCCESS"
     Write-Log ""
-    Write-Log "The scripts have been created!" "SUCCESS"
+    Write-Log "Detection script file:   $DetectScript"
+    Write-Log "Remediation script file: $RemediationScript"
+    Write-Log "Platform script file:    $PlatformScript"
     Write-Log ""
-    Write-Log "Next we are going to upload the detect and remediation script to InTune, then the Intune Platform Script."
-    Write-Log "Detect Script location: $DetectScript"
-    Write-Log "Remediate Script location: $RemediationScript"
-    Write-Log "Platform Script location: $PlatformScript"
+    Write-Log "The Intune Remediation keeps the registry values current every hour. The Intune Platform Script writes them before Win32 apps install, including during Autopilot."
+    Write-Log ""
+    Write-Log "What do you want to set up in Intune?" 'WARNING'
+    Write-Log ""
+    Write-Log "     1 - Intune Remediation and Intune Platform Script (both)"
+    Write-Log "     2 - Intune Remediation only"
+    Write-Log "     3 - Intune Platform Script only"
     Write-Log ""
 
-    Write-Log "1. In InTune, navigate to: Device > Windows > Scripts and remediations"
-    Write-Log " - Direct link: https://intune.microsoft.com/#view/Microsoft_Intune_DeviceSettings/DevicesWindowsMenu/~/powershell"
-    Write-Log ""
-    Write-Log "2. On the Remediations tab, find your existing Intune Remediation for the organization registry values: ""$RemediationExistingName"", or ""PowerDeploy Registry Update"" if it was created before this version. If you for sure do not have one, we will walk through creating one."
-    Write-Log ""
-    Write-Log "NOTE: Make sure that you do not leave behind old remediation scripts in production once replace them." "WARNING"
-    Write-Log ""
-    Write-Log "Do you need to create a new Remediation Script package entry in InTune?" "WARNING"
-    $Answer = Read-Host "(y/n)"
+    switch (Read-OrgRegistryMenuChoice -Choices @('1', '2', '3')) {
+        '1' { $Types = @('Remediation', 'PlatformScript') }
+        '2' { $Types = @('Remediation') }
+        '3' { $Types = @('PlatformScript') }
+    }
 
-    if ($Answer -eq "y"){
+    # Automatic setup via API is offered only when this PC has a client secret stored.
+    $Pending = @($Types)
+    $Api = Test-OrgRegistryApiReady
 
-        Write-Log "  To create a new entry..."
-            Write-Log ""
+    if ($Api.Ready) {
 
-        write-Log "   1. Click ""Create"""
-            Write-Log ""
+        Write-Log ""
+        Write-Log "How do you want to set it up?" 'WARNING'
+        Write-Log ""
+        Write-Log "     1 - Guided manual steps"
+        Write-Log "     2 - Automatic via API"
+        Write-Log ""
 
-        write-log "   2. Suggested name: ""$RemediationDisplayName"""
-            Write-Log ""
+        if ((Read-OrgRegistryMenuChoice -Choices @('1', '2')) -eq '2') {
 
-        Write-Log "   3. Description (copy all lines):"
-        foreach ($DescriptionLine in ($RemediationDescription -split "`n")) { Write-Log "        $DescriptionLine" }
-            Write-Log ""
+            $Metadata = @{
+                PlatformScript = @{ DisplayName = $PlatformScriptDisplayName; Description = $PlatformScriptDescription; FileName = $PlatformScriptFileName }
+                Remediation    = @{ DisplayName = $RemediationDisplayName; Description = $RemediationDescription }
+            }
+            $Files = @{ PlatformScript = $PlatformScript; DetectScript = $DetectScript; RemediationScript = $RemediationScript }
 
-        Write-Log "   4. Click Next to go to the Script settings page."
-            Write-Log ""
+            # The secret values the scripts carry, so no engine message or log line can show them.
+            $RedactValues = @($FunctionParams.CustomRepoToken, $FunctionParams.PrinterContainerSASkey, $FunctionParams.ApplicationContainerSASkey,
+                               $CustomRepoToken, $PrinterContainerSASkey, $ApplicationContainerSASkey)
+            foreach ($Url in @($FunctionParams.CustomRepoURL, $CustomRepoURL, $RepoUrl)) { if ([string]$Url -match '@') { $RedactValues += [string]$Url } }
 
-        Write-Log "   5. For ""Detection script file"", select the script located at: $DetectScript"
-            Write-Log ""
+            $Outcome = Invoke-OrgRegistryIntuneAutoUpload -Types $Types -DeployMode $Global:DeployMode -Files $Files -Metadata $Metadata -RedactValues $RedactValues
+            $Pending = @($Outcome.Pending)
 
-        Write-Log "   6. For ""Remediation script file"", select the script located at: $RemediationScript"
-            Write-Log ""
-
-        Write-Log "   7. For ""Run script in 64-bit PowerShell"" select: Yes"
-            Write-Log ""
-
-        Write-Log "   8. Click Next to go to the Scope tags page."
-            Write-Log ""
-
-        Write-Log "   9. Add any scope tags you wish to use. I don't use any personally."
-            Write-Log ""
-
-        Write-Log "  10. Click Next to go to the Assignments page and assign to your desired groups. I recommend starting with a small test group first, then expanding to the whole org (if appropriate) once confirmed working."
-            Write-Log ""
-
-        Write-Log "  11. Still on the Assignments page, set the Schedule for EACH assigned group (click the group's schedule, ""Daily"" by default): Frequency = Hourly, Repeats every = 1 hour. Click Apply."
-            Write-Log ""
-
-        Write-Log "  12. Click ""Create"" to finish creating the remediation package."
-
+            if ($Pending.Count -gt 0) {
+                Write-Log ""
+                if ($Outcome.Reason -eq 'NotReady') {
+                    Write-Log "Continuing with the guided manual steps." 'WARNING'
+                    Pause
+                } elseif (-not (Read-GraphUploadYesNo -Question ("Show the guided manual steps for {0}?" -f (Get-OrgRegistryTypeList -Types $Pending)) -Default $true)) {
+                    $Pending = @()
+                }
+            }
+        }
 
     } else {
 
-        Write-Log "  Update your existing package as follows..."
-            Write-Log ""
-
-        Write-Log "   For ""Detection script file"", select the script located at: $DetectScript"
-            Write-Log ""
-
-        Write-Log "   For ""Remediation script file"", select the script located at: $RemediationScript"
-            Write-Log ""
-
-        Write-Log "   Make sure ""Run script in 64-bit PowerShell"" is set to: Yes"
-            Write-Log ""
-
-        Write-Log "   On the Assignments page, make sure the Schedule for EACH assigned group is: Frequency = Hourly, Repeats every = 1 hour."
-            Write-Log ""
-
-        Write-Log "   If it is still named ""PowerDeploy Registry Update"" (or has an older [VER: ...]), rename it to: ""$RemediationDisplayName"""
-        Write-Log "   Set its Description to (copy all lines):"
-        foreach ($DescriptionLine in ($RemediationDescription -split "`n")) { Write-Log "        $DescriptionLine" }
-            Write-Log ""
-
-        Write-Log "   Save your changes."
-            Write-Log ""
-
+        Write-Log ""
+        Write-Log "Automatic setup via API is not available: $($Api.Reason)" 'WARNING'
+        Write-Log "Continuing with the guided manual steps." 'WARNING'
+        Write-Log ""
+        Pause
 
     }
 
-    Write-Log ""
-    Pause
-
-    ###########################################################################
-    # Intune Platform Script (guided manual upload)
-    ###########################################################################
-
-    Clear
-    Write-Log ""
-    Write-Log "==========================================================================================="
-    Write-Log "UPLOAD THE REGISTRY INTUNE PLATFORM SCRIPT TO INTUNE"
-    Write-Log "==========================================================================================="
-    Write-Log ""
-    Write-Log "This Intune Platform Script writes the same registry values as the Intune Remediation above. Intune runs"
-    Write-Log "Platform Scripts BEFORE Win32 apps, so during Autopilot the values are in place before PowerDeploy's"
-    Write-Log "apps and printers install. It needs no Git and no network on the device."
-    Write-Log "Keep the Intune Remediation as well: it keeps the values current every hour (key rotation and drift)."
-    Write-Log ""
-    Write-Log "Platform Script location: $PlatformScript"
-    Write-Log ""
-    Write-Log "NOTE: Keep only ONE org registry Intune Platform Script per deploy mode. If ""$PlatformScriptExistingName"" already exists in Intune, replace its script file (steps below) instead of adding a second one." "WARNING"
-    Write-Log ""
-    Write-Log "1. In the Intune admin center, go to: Devices > Scripts and remediations > Platform scripts"
-    Write-Log " - Direct link: https://intune.microsoft.com/#view/Microsoft_Intune_DeviceSettings/DevicesWindowsMenu/~/powershell (then select the Platform scripts tab)"
-    Write-Log ""
-    Write-Log "Do you need to create a new Intune Platform Script for this deploy mode ($Global:DeployMode)?" "WARNING"
-    $Answer = Read-Host "(y/n)"
-
-    if ($Answer -eq "y"){
-
-        Write-Log "  To create a new Intune Platform Script..."
-            Write-Log ""
-
-        Write-Log "   1. Click ""Add"", then select ""Windows 10 and later""."
-            Write-Log ""
-
-        Write-Log "   2. Name: ""$PlatformScriptDisplayName"""
-            Write-Log ""
-
-        Write-Log "   3. Description (copy all lines):"
-        foreach ($DescriptionLine in ($PlatformScriptDescription -split "`n")) { Write-Log "        $DescriptionLine" }
-            Write-Log ""
-
-        Write-Log "   4. Click Next to go to the Script settings page."
-            Write-Log ""
-
-        Write-Log "   5. For ""Script location"", select the script located at: $PlatformScript"
-            Write-Log ""
-
-        Write-Log "   6. For ""Run this script using the logged on credentials"" select: No"
-            Write-Log ""
-
-        Write-Log "   7. For ""Enforce script signature check"" select: No"
-            Write-Log ""
-
-        Write-Log "   8. For ""Run script in 64-bit PowerShell host"" select: Yes"
-            Write-Log ""
-
-        Write-Log "   9. Click Next to go to the Scope tags page and add any scope tags you use."
-            Write-Log ""
-
-        Write-Log "  10. Click Next to go to the Assignments page and assign it to DEVICE groups (groups whose members are devices, such as your Autopilot device group). Only scripts assigned to device groups run in the Autopilot device phase, before Win32 apps install. I recommend starting with a small test group first."
-            Write-Log ""
-
-        Write-Log "  11. Click Next, then ""Add"" to finish creating the Intune Platform Script."
-            Write-Log ""
-
-    } else {
-
-        Write-Log "  Replace the script file on your existing Intune Platform Script (""$PlatformScriptExistingName"") as follows..."
-            Write-Log ""
-
-        Write-Log "   Open it and select Properties. Next to ""Script settings"", click Edit."
-            Write-Log ""
-
-        Write-Log "   For ""Script location"", select the script located at: $PlatformScript"
-            Write-Log ""
-
-        Write-Log "   Make sure ""Run this script using the logged on credentials"" = No, ""Enforce script signature check"" = No, ""Run script in 64-bit PowerShell host"" = Yes."
-            Write-Log ""
-
-        Write-Log "   Next to ""Basics"", click Edit and set the Name to: ""$PlatformScriptDisplayName"""
-        Write-Log "   and the Description to (copy all lines):"
-        foreach ($DescriptionLine in ($PlatformScriptDescription -split "`n")) { Write-Log "        $DescriptionLine" }
-            Write-Log ""
-
-        Write-Log "   Make sure it is assigned to DEVICE groups, then click ""Review + save"", then ""Save""."
-            Write-Log ""
-
+    if ($Pending -contains 'Remediation') {
+        Show-OrgRegistryGuidedRemediation -DetectScript $DetectScript -RemediationScript $RemediationScript -DisplayName $RemediationDisplayName `
+            -ExistingName $RemediationExistingName -Description $RemediationDescription -DeployMode $Global:DeployMode
     }
 
-    Write-Log ""
+    if ($Pending -contains 'PlatformScript') {
+        Show-OrgRegistryGuidedPlatformScript -PlatformScript $PlatformScript -DisplayName $PlatformScriptDisplayName `
+            -ExistingName $PlatformScriptExistingName -Description $PlatformScriptDescription -DeployMode $Global:DeployMode
+    }
 
     # >>> MARKED FOR FUTURE DELETION (org registry Intune Platform Script, 2026-11) >>>
     # Packaging the remediation script as an InTuneWin Win32 app was the old way to get the org registry
-    # values onto devices during Autopilot. The Intune Platform Script above replaces it. Kept, unchanged,
-    # until the Platform Script is proven in production; then delete from this line to the matching
-    # "<<< END MARKED FOR FUTURE DELETION" line below.
-    Write-Log "Do you need to create a new InTuneWin package entry in InTune?" "WARNING"
-    $Answer = Read-Host "(y/n)"
-    if ($Answer -eq "y"){
+    # values onto devices during Autopilot. The Intune Platform Script replaces it. Asked only with the
+    # guided manual steps for the Intune Remediation. Kept until the Intune Platform Script is proven in
+    # production; then delete from this line to the matching "<<< END MARKED FOR FUTURE DELETION" line below.
+    if ($Pending -contains 'Remediation') {
 
-        Write-Log "Now packaging InTuneWin stuff..."
+        Write-Log ""
+        Write-Log "Do you need the .intunewin package of the remediation script? This is a legacy option; the Intune Platform Script replaces it." "WARNING"
+        $Answer = Read-Host "(y/n)"
+        if ($Answer -eq "y"){
 
-        Make-InTuneWin -SourceFile $RemediationScript
-        $RemediationIntuneWinPath = $Global:intunewinpath
+            Write-Log "Packaging the remediation script as an .intunewin package..."
 
-        Write-Log ""    
-        Write-Log "The Intune Win32 app package has been created at: $RemediationIntuneWinPath"
-        # Write-Log ""    
+            Make-InTuneWin -SourceFile $RemediationScript
+            $RemediationIntuneWinPath = $Global:intunewinpath
 
-        # Write-Log "Next we will automatically create the install/uninstall commands. Keep in mind the uninstall command is dummy, it won't do anything by design in this scenario."
+            Write-Log ""
+            Write-Log "The .intunewin package has been created at: $RemediationIntuneWinPath"
+            # Write-Log ""
+
+            # Write-Log "Next we will automatically create the install/uninstall commands. Keep in mind the uninstall command is dummy, it won't do anything by design in this scenario."
 
 
-        Write-Log ""   
+            Write-Log ""
 
-        $RemediationScriptName = Split-Path -Path $RemediationScript -Leaf
+            $RemediationScriptName = Split-Path -Path $RemediationScript -Leaf
 
-        $InstallCommand = '%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ''.\'+"$RemediationScriptName"+'''"'
-    
-        Write-Log "InstallCommand: $InstallCommand"
-        Write-Log ""   
+            $InstallCommand = '%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ''.\'+"$RemediationScriptName"+'''"'
 
-        Write-Log "UninstallCommand (dummy): $InstallCommand"
+            Write-Log "InstallCommand: $InstallCommand"
+            Write-Log ""
 
-        Write-Log ""   
+            Write-Log "UninstallCommand (dummy): $InstallCommand"
 
-        Write-Log "Detection Script: $DetectScript"
+            Write-Log ""
 
-        Write-Log ""  
+            Write-Log "Detection script file: $DetectScript"
 
+            Write-Log ""
+
+
+        }
 
     }
     # <<< END MARKED FOR FUTURE DELETION (org registry Intune Platform Script, 2026-11) <<<
 
-    Pause
     Write-Log ""
-    Write-Log "That's all! After deploying to endpoints give your target machines some time and monitor progress." "SUCCESS"
-
-
+    Write-Log "Done. Give the assigned devices time to receive the changes, and check their status in the Intune admin center." "SUCCESS"
+    Write-Log ""
+    Pause
 
 }
 
@@ -6201,7 +6905,7 @@ Function Invoke-GraphUploadRemoveCredential {
     }
 
     Write-Log ""
-    Write-Log "Removal only affects this workstation's stored credential. It never deletes the shared application,"
+    Write-Log "Removal only affects this PC's stored credential. It never deletes the shared application,"
     Write-Log "never removes its service principal, and never touches another administrator's secret. The Entra secret"
     Write-Log "itself stays active unless you also revoke it below." 'WARNING'
     Write-Log ""
@@ -6591,9 +7295,21 @@ Function Read-IntunePublishChoice {
 }
 
 Function Read-IntuneGroupList {
-    param([Parameter(Mandatory = $true)][string]$Intent)
+    param(
+        [Parameter(Mandatory = $true)][string]$Intent,
+        # Replaces the app wizard's question (OrganizationRegistryEntries--InTune-Setup asks its own).
+        [string]$Prompt,
+        # Lines shown under the question, before the answer is read.
+        [string[]]$Note = @()
+    )
 
-    Write-Log ("Enter the {0} assignment groups, separated by ';' (e.g. IT PCs; Techs). Use exact group names or object IDs, or /AllDevices or /AllUsers for Intune's built-in targets. Leave blank for none." -f $Intent.ToUpperInvariant()) 'WARNING'
+    if ([string]::IsNullOrWhiteSpace($Prompt)) {
+        $Prompt = ("Enter the {0} assignment groups, separated by ';' (e.g. Test Devices; Lab Devices). Use exact group names or object IDs, or /AllDevices or /AllUsers for Intune's built-in targets. Leave blank for none." -f $Intent.ToUpperInvariant())
+    }
+    Write-Log $Prompt 'WARNING'
+    foreach ($Line in @($Note)) {
+        if (-not [string]::IsNullOrWhiteSpace($Line)) { Write-Log ("     " + $Line.Trim()) 'INFO2' }
+    }
     $Raw = [string](Read-Host $Intent)
 
     # Spec 5.2: split on semicolons, trim, discard empty pieces. Returned as plain pipeline items:
@@ -6720,7 +7436,7 @@ Function Invoke-InTuneAutoUpload {
         Write-Log ""
 
         if (-not $GraphUploadAvailable) {
-            Write-Log "Automatic setup is not available on this workstation: $GraphUploadLoadError" 'WARNING'
+            Write-Log "Automatic setup is not available on this PC: $GraphUploadLoadError" 'WARNING'
             Write-Log "Continuing with the guided manual setup." 'WARNING'
             Pause
             return $false

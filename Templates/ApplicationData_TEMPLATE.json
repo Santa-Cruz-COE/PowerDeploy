@@ -145,6 +145,11 @@
     "EXEPathFromContainerRoot":"RMM/AGENT.EXE",
     "DisplayName":"Remote Monitoring Agent",
     "UninstallType": "All"
+  },  
+  {
+    "ApplicationName": "Node.js",
+    "InstallMethod": "WinGet",
+    "WinGetID": "OpenJS.NodeJS"
   }
   ]
 }

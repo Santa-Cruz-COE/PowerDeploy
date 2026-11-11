@@ -1143,7 +1143,7 @@ function Get-PDGraphNormalizedResponse {
     if ($null -eq $ErrorRecord) {
         $headers = @{}
         try {
-            foreach ($name in @('request-id', 'apim-request-id', 'Retry-After', 'x-msft-approval-justification', 'x-ms-request-id', 'Location')) {
+            foreach ($name in @('request-id', 'apim-request-id', 'Retry-After', 'x-msft-approval-justification', 'x-msft-approval-code', 'x-ms-request-id', 'Location')) {
                 $value = Get-PDGraphResponseHeader -Headers $Response.Headers -Name $name
                 if ($null -ne $value) { $headers[$name] = $value }
             }
@@ -1186,7 +1186,7 @@ function Get-PDGraphNormalizedResponse {
                 $status = [int]$responseMessage.StatusCode
             }
             if ($responseMessage.PSObject.Properties['Headers']) {
-                foreach ($name in @('request-id', 'apim-request-id', 'Retry-After', 'x-msft-approval-justification', 'x-ms-request-id')) {
+                foreach ($name in @('request-id', 'apim-request-id', 'Retry-After', 'x-msft-approval-justification', 'x-msft-approval-code', 'x-ms-request-id')) {
                     $value = Get-PDGraphResponseHeader -Headers $responseMessage.Headers -Name $name
                     if ($null -ne $value) { $headers[$name] = $value }
                 }
@@ -1208,7 +1208,7 @@ function Get-PDGraphNormalizedResponse {
                 $webResponse = $inner.Response
                 $status = [int]$webResponse.StatusCode
 
-                foreach ($name in @('request-id', 'apim-request-id', 'Retry-After', 'x-msft-approval-justification', 'x-ms-request-id')) {
+                foreach ($name in @('request-id', 'apim-request-id', 'Retry-After', 'x-msft-approval-justification', 'x-msft-approval-code', 'x-ms-request-id')) {
                     $value = Get-PDGraphResponseHeader -Headers $webResponse.Headers -Name $name
                     if ($null -ne $value) { $headers[$name] = $value }
                 }
@@ -1407,6 +1407,8 @@ function Test-PDGraphApprovalRequired {
     try {
         if ($null -ne $Headers) {
             if ($Headers.ContainsKey('x-msft-approval-justification')) { return $true }
+            # The header Intune sends with HTTP 412 when Multi-Admin Approval holds a write.
+            if ($Headers.ContainsKey('x-msft-approval-code')) { return $true }
         }
     } catch { }
 
@@ -6710,7 +6712,7 @@ function Get-PDGraphUploadMaaGuidance {
     # The same five steps apply to each, so they are listed once.
     $policies = @(
         'Apps policy:    needed for printer and app uploads',
-        'Scripts policy: needed for Intune Platform Script and Intune Remediation uploads'
+        'Scripts policy: needed for Intune Remediation and Intune Platform Script uploads'
     )
 
     $steps = @(

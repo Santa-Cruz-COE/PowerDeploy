@@ -54,7 +54,7 @@ Built for teams that have gone cloud-first and hit the walls — apps that fail 
   - [Printer manifest format](#printer-manifest-format)
 - [Packaging and managing your assets](#packaging-and-managing-your-assets)
   - [Publishing to Intune automatically (optional)](#publishing-to-intune-automatically-optional)
-  - [Bulk printer tools (optional)](#bulk-printer-tools-optional)
+  - [Bulk tools (optional)](#bulk-tools-optional)
 - [What you can do with it](#what-you-can-do-with-it)
 - [How it works (under the hood)](#how-it-works-under-the-hood)
   - [The runner pattern](#the-runner-pattern)
@@ -181,7 +181,7 @@ Instead of copying the wizard's output into the Intune portal by hand, Setup can
 - **Who can run setup:** granting Microsoft Graph application permissions needs **Privileged Role Administrator** or **Global Administrator**. If you don't hold those, have someone who does create the registration and use the *Manual* choice.
 - **Admin sign-in prerequisite:** Automatic setup, rotation, and removal-with-revocation each open a temporary administrator sign-in, which needs the `Microsoft.Graph.Authentication` module (uploads themselves don't). If it is missing, Setup offers to install it for your Windows account from the PowerShell Gallery; or install it yourself with `Install-Module Microsoft.Graph.Authentication -Scope CurrentUser`. The Microsoft sign-in screen names *Microsoft Graph Command Line Tools* (Microsoft's app for Graph PowerShell); leave **Consent on behalf of your organization** unchecked.
 - **Where the secret lives:** `%LOCALAPPDATA%\PowerDeploy\GraphUpload\credential.clixml`, encrypted with Windows DPAPI for your Windows account only. Lifetime is chosen at setup (default 1 day, i.e. 24 hours; up to 730 days). The short default limits how long a copied secret could be used, because it can change Intune apps and scripts on every device. Setup warns when 24 hours or less are left, and right before an API upload, if the secret has expired or has 2 hours or less left, it offers to sign in and create a new 24-hour secret. The old one is deleted from Entra by its recorded Secret ID (always recorded for secrets Setup created; Manual entry asks for it). If none is recorded, Setup says it assumes the secret was entered by hand through the Manual option, does not delete it, and leaves it for you to delete in Entra once no other PC uses it. Saying no to a secret that has not expired yet continues the upload with it; an expired secret means no API upload until it is replaced. Automatic setup gives each admin PC its own secret; with Manual entry, avoid sharing one secret between PCs.
-- **Multi-Admin Approval (MAA):** if your tenant requires a second admin to approve app changes, add `PowerDeploy Intune Upload` to the **Exclusions** of the MAA *apps* access policy (Intune → Tenant administration → Multi Admin Approval → Access policies; option 5 prints the exact steps). Scripts are protected by a separate access policy: add the same registration to the Exclusions of the policy for the **Scripts** profile type as well. Each exclusion change needs approval by a second admin. Whether the Scripts policy also covers remediations is not yet confirmed. The exclusions cover only uploads made by that app registration; changes made in the portal still need approval. They survive secret rotation.
+- **Multi-Admin Approval (MAA):** if your tenant requires a second admin to approve app changes, add `PowerDeploy Intune Upload` to the **Exclusions** of the MAA *apps* access policy (Intune → Tenant administration → Multi Admin Approval → Access policies; `InTuneAPI--Setup-and-Manage` > *MAA Exclusions - Setup/Config manually* prints the exact steps). Scripts are protected by a separate access policy: add the same registration to the Exclusions of the policy for the **Scripts** profile type as well (the org registry scripts upload needs it). Each exclusion change needs approval by a second admin. Whether the Scripts policy also covers remediations is not yet confirmed. The exclusions cover only uploads made by that app registration; changes made in the portal still need approval. They survive secret rotation.
 
 **Publishing** — in `Printer--InTune-Setup` or `WindowsApp--InTune-Setup`, choose **2 - Automatic setup via the API** when asked:
 
@@ -192,9 +192,25 @@ Instead of copying the wizard's output into the Intune portal by hand, Setup can
 
 **What goes where:** the **Description** (shown to users in the Company Portal) is, for printers, `Department`, `Location`, `Model`, `Asset` and `PrinterIP` (`N/A` for any that are blank); for apps, the catalog's `AppDescription`, or — for WinGet apps without one — the description from `winget show` (Microsoft Store first, then the WinGet community source), else `N/A`. Printers also get the standard icon [`Templates/Printer-Icon.png`](Templates/Printer-Icon.png) (replace that file to use your own); apps can name one with `IconFile` (a PNG/JPEG/SVG in the repo) or `IconUrl` (an `https` link, downloaded at publish time). An SVG is converted to a PNG at publish time with the bundled [resvg](https://github.com/linebender/resvg) (`Other_Tools/resvg/resvg.exe`, pinned by SHA256); it is not code-signed, so an AppLocker/WDAC policy may block it, and Setup then warns and publishes without an icon. The Company Portal **information and privacy links** come from the catalog's `InformationUrl` / `PrivacyUrl`, or — for WinGet apps — from `winget show` (`Homepage`, else `Publisher Url`; `Privacy Url`). Icons and links are set in a separate best-effort step, so a problem with them is a warning, never a failed upload. The **Publisher** is the catalog's `Publisher`, else (WinGet apps) the publisher `winget show` reports, else `PowerDeploy`. The **Version** is the catalog's `PackagedVersion` or `Version`, else the PowerDeploy source commit (printers always use the commit) — never WinGet's version number, since WinGet installs the latest release on each device. The **Notes** (admin-only) hold the technical block: target and source repo/branch, source commit, `Verified`, install method, versions and prerequisites for apps, and a `Created:` timestamp. Repository URLs are shown without any embedded credentials.
 
-### Bulk printer tools (optional)
+**Org registry scripts** — `OrganizationRegistryEntries--InTune-Setup` builds the two Intune objects that write the organization registry values (`HKLM\SOFTWARE\PowerDeploy`) on devices:
 
-With the upload credential set up, two Setup entries handle many printers at once through a CSV you edit (usually in Excel). Nothing changes in Intune until you confirm a summary.
+- the **Intune Remediation** `POWERDEPLOY ORG REGISTRY: Remediation`. It runs every hour and keeps the values current (SAS key rotation, drift).
+- the **Intune Platform Script** `POWERDEPLOY ORG REGISTRY: Platform Script`. It is self-contained (no Git, no network on the device), and Intune runs it before Win32 apps, so during Autopilot the values are in place before PowerDeploy's apps and printers install. Only device groups run it during the Autopilot device phase.
+
+Other deploy modes add ` [MODE: <mode>] [VER: <commit>]` to the names. Choose both or either one, then **Guided manual steps** or **Automatic via API** (offered when this PC has a client secret). Automatic via API:
+
+1. Reads every `POWERDEPLOY ORG REGISTRY:` object in Intune (names and assignments, never script content) and finds the one for this deploy mode, whatever its `[VER: ...]`. If there is none, it creates one; if there is one, it updates it in place; if there are several, you pick the one to update.
+2. Asks for one set of groups for both objects (same rules as above). When every object is an update and they all have the same assignments, Enter keeps them.
+3. Warns, and asks before continuing, when another org registry object (any deploy mode, either type) is already assigned to one of those groups.
+4. Shows a review. After you confirm, it writes, assigns (new Intune Remediation assignments run hourly) and reads everything back, comparing the script content by SHA256. Each object's ID is shown with its Intune admin center link.
+5. If anything fails, it deletes only an object it created in that run, says exactly what was and wasn't changed, and offers the guided steps.
+6. After a successful upload it lists every org registry object in Intune (all deploy modes), numbered, so old copies can be deleted. The objects just uploaded can't be selected. Each deleted object's name, ID and assignments are written to the Setup log first.
+
+The same list is the first question's **View and delete existing registry scripts in Intune** choice. Objects created by hand before this version are only recognized once they are renamed to the PowerDeploy name.
+
+### Bulk tools (optional)
+
+With the upload credential set up, three Setup entries handle many printers or apps at once through a CSV you edit (usually in Excel). Nothing changes in Intune until you confirm a summary.
 
 **`Printer--InTune-BulkCreate`** — publish printers from `PrinterData.json`:
 
@@ -210,7 +226,9 @@ With the upload credential set up, two Setup entries handle many printers at onc
 
 **`Printer--InTune-BulkDelete`** — clean up Intune: lists every PowerDeploy printer app (all modes) in `delete.csv` (same editor rules as above). Put `Y` in `Delete` (or tick it) for the ones to remove, save, and type the count to confirm. Each app is backed up (settings and assignments) to a JSON file before it is deleted. **Devices keep printers they already have.**
 
-Files go to `TEMP\PrinterBulk\` in the PowerDeploy working directory. Renaming printers isn't supported yet: a renamed printer is created as a new one, and the old queue stays on devices.
+**`WindowsApp--InTune-BulkDelete`** — the same for apps: lists every Intune Win32 app whose name starts with `APP: ` (the prefix `WindowsApp--InTune-Setup` gives), all deploy modes, in `delete.csv`. Mark the ones to remove, save, and type the count to confirm. Each app is backed up (settings and assignments) to a JSON file before it is deleted. **Devices keep the installed application.**
+
+Files go to `TEMP\PrinterBulk\` (printers) and `TEMP\AppBulk\` (apps) in the PowerDeploy working directory. Renaming printers isn't supported yet: a renamed printer is created as a new one, and the old queue stays on devices.
 
 ---
 
@@ -220,7 +238,7 @@ Files go to `TEMP\PrinterBulk\` in the PowerDeploy working directory. Renaming p
 - **Deploy network (IP) printers** with centrally managed driver packs and per-printer JSON config.
 - **Uninstall almost anything** through a single multi-method uninstaller.
 - **Generate Intune Win32 packages, install/uninstall commands, and detection scripts** automatically from a guided wizard.
-- **Push organization configuration** (repo URL and token, container SAS keys, plus the storage account name and manifest paths) to endpoints via Intune remediation scripts.
+- **Push organization configuration** (repo URL and token, container SAS keys, plus the storage account name and manifest paths) to endpoints via an Intune Platform Script (before Win32 apps, including during Autopilot) and an Intune Remediation (hourly).
 - **Manage Windows registry and optional features** with safe, ACL-aware operations.
 - **Run everything locally on demand** for testing and urgent fixes, independent of the management tool's schedule.
 
@@ -292,7 +310,7 @@ ENDPOINT (SYSTEM context, triggered by Intune or on demand)
 | **App payloads** | WinGet catalog, Azure Blob Storage, or a direct URL | WinGet, or `DownloadFrom-AzureBlob-*` at run time |
 | **Printer drivers** | Driver ZIPs in Azure Blob Storage | Azure Blob download → extract → `pnputil` |
 | **What to install (manifest)** | Apps: public catalog `Templates/ApplicationData_TEMPLATE.json` in the repo + private `ApplicationData.json` in Blob. Printers: private `PrinterData.json` in Blob only | Read at run time |
-| **Org configuration** | `HKLM\SOFTWARE\PowerDeploy` registry | Set once via Intune remediation scripts |
+| **Org configuration** | `HKLM\SOFTWARE\PowerDeploy` registry | Set by an Intune Platform Script and kept current by an Intune Remediation |
 
 ---
 
@@ -353,12 +371,13 @@ The same deployment serves two execution paths from one definition:
 - [`Setup.ps1`](Setup.ps1) — the technician's main entry point (guided wizards + local install/uninstall + config remediation generation). Its menu is built when it starts, so the numbers can change; the functions are:
   - `Adobe-Apps-FullCleanup--Uninstall-Local` — runs the bundled Adobe full-cleanup uninstaller on this machine.
   - `InTuneAPI--Setup-and-Manage` — sets up, tests, rotates or removes the optional Intune upload credential, and shows the Multi-Admin Approval steps (see [Publishing to Intune automatically](#publishing-to-intune-automatically-optional)).
-  - `OrganizationRegistryEntries--InTune-Setup` — generates the detection/remediation scripts that push org configuration to the registry, and can optionally also build a `.intunewin` of the remediation script.
+  - `OrganizationRegistryEntries--InTune-Setup` — generates the Intune Remediation and the Intune Platform Script that write the org configuration to the registry, then sets them up in Intune with guided manual steps or automatically via the API; also lists and deletes existing ones (see [Publishing to Intune automatically](#publishing-to-intune-automatically-optional)).
   - `OrganizationRegistryEntries--Local-Setup` — asks the same questions as `OrganizationRegistryEntries--InTune-Setup` (no deployment mode), then writes the org configuration straight to this PC's `HKLM\SOFTWARE\PowerDeploy`, locks the key down, and reads the values back. For setting up a machine by hand when no registry remediation targets it.
   - `Printer--Convert-Vendor-DriverPack` — turns a manufacturer's driver pack into a PowerDeploy driver zip (see [Migrating from a print server](#migrating-from-a-print-server)).
-  - `Printer--InTune-BulkCreate` / `Printer--InTune-BulkDelete` — create many printers in Intune from `PrinterData.json`, or delete many printer apps, through one CSV (see [Bulk printer tools](#bulk-printer-tools-optional)).
+  - `Printer--InTune-BulkCreate` / `Printer--InTune-BulkDelete` — create many printers in Intune from `PrinterData.json`, or delete many printer apps, through one CSV (see [Bulk tools](#bulk-tools-optional)).
   - `Printer--InTune-Setup` — packages a printer from `PrinterData.json` for Intune, then walks you through creating it or creates it automatically.
   - `Printer--Install-Local` / `Printer--Uninstall-Local` — installs or removes a printer on this machine.
+  - `WindowsApp--InTune-BulkDelete` — deletes many PowerDeploy Windows apps from Intune through one CSV (see [Bulk tools](#bulk-tools-optional)).
   - `WindowsApp--InTune-Setup` — packages an app from the catalog for Intune (not `Custom_Script` apps yet), then walks you through creating it or creates it automatically.
   - `WindowsApp--Install-Local` — installs a catalog app on this machine.
   - `WindowsApp--Uninstall-Local` — opens a sub-menu of search-and-uninstall methods for this machine: `AppPackage`, `CIM`, and `Registry`.
@@ -413,7 +432,7 @@ PowerDeploy/
 
 ## Configuration model
 
-Per-organization settings live in the registry under **`HKLM\SOFTWARE\PowerDeploy`**, organized into three subkeys. They're typically deployed fleet-wide using the **Intune remediation scripts** that `Setup.ps1` can generate, and read at run time by [`OrganizationCustomRegistryValues-Reader_TEMPLATE.ps1`](Templates/OrganizationCustomRegistryValues-Reader_TEMPLATE.ps1).
+Per-organization settings live in the registry under **`HKLM\SOFTWARE\PowerDeploy`**, organized into three subkeys. They're typically deployed fleet-wide with the **Intune Remediation** and **Intune Platform Script** that `Setup.ps1` generates (`OrganizationRegistryEntries--InTune-Setup`), and read at run time by [`OrganizationCustomRegistryValues-Reader_TEMPLATE.ps1`](Templates/OrganizationCustomRegistryValues-Reader_TEMPLATE.ps1).
 
 | Subkey | Value | Purpose |
 |---|---|---|
@@ -484,7 +503,7 @@ Each entry is timestamped and tagged with a severity level (`INFO`, `WARNING`, `
 - **ACL enforcement** via the Security Manager: working folders, the Intune Management Extension log folder (`C:\ProgramData\Microsoft\IntuneManagementExtension\Logs`), and the `HKLM\SOFTWARE\PowerDeploy` hive are restricted to SYSTEM + Administrators, with inheritance broken.
 - **Path validation** guards against malformed/injection-prone paths before any file or registry operation runs.
 - **Azure Blob access** uses scoped, read-only SAS tokens (or AAD for user-context scenarios) rather than embedded account keys.
-- **Endpoints hold no tenant credentials.** The only PowerDeploy credential that can change Intune is the optional upload secret, which lives on an admin workstation only, DPAPI-encrypted for one Windows account, and expires (default 24 hours). Its permissions cover Intune apps (including app configuration and protection policies), Intune platform scripts and remediations (which run as SYSTEM on the devices they are assigned to), and reading all groups and their members — protect that workstation and account accordingly, and remove the secret from PCs that no longer need it. Entra administrators who can manage the app registration can also issue new secrets for it. See [ARCHITECTURE.md §7](ARCHITECTURE.md#7-trust-and-security-model).
+- **Endpoints hold no tenant credentials.** The only PowerDeploy credential that can change Intune is the optional upload secret, which lives on an admin workstation only, DPAPI-encrypted for one Windows account, and expires (default 24 hours). Its permissions cover Intune apps (including app configuration and protection policies), Intune platform scripts and remediations (which run as SYSTEM on the devices they are assigned to), and reading all groups and their members — protect that workstation and account accordingly, and remove the secret from PCs that no longer need it. The org registry scripts upload sends script content that contains the SAS keys and the repository token only to Microsoft Graph, and removes those values from every message and log line it writes (the value prompts before it still log what they read; see [ARCHITECTURE.md §7.2](ARCHITECTURE.md#72-secrets-inventory)). Entra administrators who can manage the app registration can also issue new secrets for it. See [ARCHITECTURE.md §7](ARCHITECTURE.md#7-trust-and-security-model).
 
 ---
 

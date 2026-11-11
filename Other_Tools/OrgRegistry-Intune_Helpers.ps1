@@ -2,12 +2,14 @@
 
 .SYNOPSIS
     Shared naming for the two Intune objects that carry PowerDeploy's organization registry values:
-    the Intune Platform Script and the Intune Remediation. Display name (and its parser), Description,
+    the Intune Remediation and the Intune Platform Script. Display name (and its parser), Description,
     the platform script's Intune file name, and the source commit they are stamped with.
 
 .DESCRIPTION
     One copy of this logic, used by:
-      - Setup.ps1  OrganizationRegistryEntries--InTune-Setup  (guided manual upload; later the API upload)
+      - Setup.ps1  OrganizationRegistryEntries--InTune-Setup  (guided manual steps)
+      - Other_Tools\Upload-InTuneOrgRegistryScripts.ps1  (API upload: finding existing copies, the
+        deletion list)
       - Other_Tools\Generate_Install-Command.ps1  OrgRegistryPlatformScript  (source commit)
 
     Existing copies in Intune are found by parsing display names (name + deploy mode, ignoring the
@@ -91,6 +93,9 @@ Function ConvertFrom-PDOrgRegistryIntuneDisplayName {
         .NOTES
         Case-sensitive on purpose: Setup always writes "POWERDEPLOY ORG REGISTRY", so a differently
         cased name is somebody else's object. A name without the " [MODE: x] [VER: y]" tail is PRODUCTION.
+        The mode is the printer parser's class ([A-Z][A-Z0-9-]*, Printer-Intune_Helpers.ps1
+        ConvertFrom-PDPrinterIntuneDisplayName): no spaces, no lower case. A near-copy such as
+        "[MODE:  PUBLIC-TESTING ]" is therefore not an org registry name and is never matched or updated.
         Takes [object] so that anything (an array, a Graph object, $null) binds; only a single string
         can be an org registry name.
     #>
@@ -102,7 +107,7 @@ Function ConvertFrom-PDOrgRegistryIntuneDisplayName {
         if ($DisplayName -isnot [string]) { return $result }
         if ([string]::IsNullOrWhiteSpace($DisplayName)) { return $result }
 
-        $found = [regex]::Match($DisplayName.Trim(), '^POWERDEPLOY ORG REGISTRY: (?<type>Platform Script|Remediation)(?: \[MODE: (?<mode>[^\[\]\r\n]+)\] \[VER: (?<ver>[^\[\]\r\n]*)\])?\z')
+        $found = [regex]::Match($DisplayName.Trim(), '^POWERDEPLOY ORG REGISTRY: (?<type>Platform Script|Remediation)(?: \[MODE: (?<mode>[A-Z][A-Z0-9-]*)\] \[VER: (?<ver>[^\[\]\r\n]*)\])?\z')
         if (-not $found.Success) { return $result }
 
         $type = 'Remediation'
@@ -111,9 +116,8 @@ Function ConvertFrom-PDOrgRegistryIntuneDisplayName {
         $mode = 'PRODUCTION'
         $version = ''
         if ($found.Groups['mode'].Success) {
-            $mode    = $found.Groups['mode'].Value.Trim()
+            $mode    = $found.Groups['mode'].Value
             $version = $found.Groups['ver'].Value
-            if ([string]::IsNullOrWhiteSpace($mode)) { return $result }
         }
 
         $result.IsOrgRegistry = $true

@@ -1,11 +1,11 @@
 <#
 
 .SYNOPSIS
-    Bulk printer tools for Intune: create every printer in PrinterData.json from one CSV, and delete
-    many printer apps from one CSV.
+    Bulk tools for Intune: create every printer in PrinterData.json from one CSV, and delete many
+    printer apps or Windows apps from one CSV.
 
 .DESCRIPTION
-    The logic behind two Setup.ps1 menu entries:
+    The logic behind three Setup.ps1 menu entries:
 
       Printer--InTune-BulkCreate  PrinterData.json -> draft CSV (Include / groups editable) -> stage
                                   (groups resolved, existing printers found) -> confirm -> create.
@@ -15,6 +15,8 @@
                                   app is backed up to JSON before it is deleted.
       Printer--InTune-BulkDelete  every PowerDeploy printer app -> CSV (mark rows) -> confirm ->
                                   back up -> delete. Intune cleanup only: devices keep the printer.
+      WindowsApp--InTune-BulkDelete  the same flow and code for every Win32 app whose name starts
+                                  with "APP: ". Devices keep the installed application.
 
     No prompts live here; Setup.ps1 owns every question. Everything is reachable offline through
     the Graph helper library's TestTransport seam, which is how Tests\PrinterIntuneBulk.Tests.ps1
@@ -49,8 +51,16 @@ $script:PDBulk = @{
     DeleteColumns       = @('Delete', 'DisplayName', 'PrinterName', 'DeployMode', 'Version', 'Created', 'AppId')
     DeleteResultColumns = @('DisplayName', 'PrinterName', 'DeployMode', 'AppId', 'Result', 'BackupFile', 'Error')
 
+    # Bulk delete of Windows apps (WindowsApp--InTune-BulkDelete): the same sheet flow and code.
+    AppDeleteColumns       = @('Delete', 'DisplayName', 'AppName', 'DeployMode', 'Version', 'Created', 'AppId')
+    AppDeleteResultColumns = @('DisplayName', 'AppName', 'DeployMode', 'AppId', 'Result', 'BackupFile', 'Error')
+
     # Every printer app Setup creates starts with this (see Get-PDPrinterIntuneDisplayName).
     DisplayNamePrefix = 'PRINTER'
+    # Every Windows app WindowsApp--InTune-Setup creates starts with this ("APP: <ApplicationName>").
+    AppDisplayNamePrefix = 'APP: '
+    # Only Win32 apps are listed for the Windows app bulk delete.
+    Win32AppODataType = '#microsoft.graph.win32LobApp'
     Category          = 'Printers'
 }
 
@@ -317,40 +327,36 @@ function Get-PDPrinterReferenceValues {
 # Intune: list, back up, delete
 # ---------------------------------------------------------------------------
 
-function Get-PDIntunePrinterApps {
+function Get-PDIntuneAppListByPrefix {
     <#
         .SYNOPSIS
-        Every Intune app whose display name is one Setup would give a printer, all deploy modes.
+        Every Intune app whose display name starts with Prefix: { Id; DisplayName; ODataType; Created }.
+        Shared by the printer and the Windows app bulk delete.
 
         .DESCRIPTION
         startswith() is the query Find-PDIntuneDuplicateApps already relies on for bracketed
-        development names (an eq filter never matches a name containing [ or ]). The parse below,
-        not the query, decides what counts as a printer.
-
-        .OUTPUTS
-        { AppId; DisplayName; PrinterName; Department; DeployMode; Version; Created } sorted by
-        PrinterName, then DeployMode.
+        development names (an eq filter never matches a name containing [ or ]). Every page is
+        followed. The callers' parsers, not the query, decide what counts.
     #>
     param(
+        [Parameter(Mandatory = $true)][string]$Prefix,
         [AllowNull()][object]$AuthContext,
-        [string]$Stage = 'ListPrinters'
+        [string]$Stage = 'ListApps',
+        [string]$Description = 'app list'
     )
 
     $query = @{
-        '$filter' = 'startswith(displayName,' + (ConvertTo-PDODataStringLiteral -Value $script:PDBulk.DisplayNamePrefix) + ')'
+        '$filter' = 'startswith(displayName,' + (ConvertTo-PDODataStringLiteral -Value $Prefix) + ')'
         '$select' = 'id,displayName,createdDateTime'
     }
     $path  = New-PDGraphQueryPath -Path ([string]$script:PDGraph.MobileAppsPath) -Query $query
-    $items = Get-PDGraphCollection -Path $path -AuthContext $AuthContext -Stage $Stage -Description 'printer app list'
+    $items = Get-PDGraphCollection -Path $path -AuthContext $AuthContext -Stage $Stage -Description $Description
 
     $apps = @()
     foreach ($item in (Get-PDGraphItems -Payload $items)) {
         $id   = [string](Get-PDGraphPropertyValue -Object $item -Name 'id')
         $name = [string](Get-PDGraphPropertyValue -Object $item -Name 'displayName')
         if ([string]::IsNullOrWhiteSpace($id)) { continue }
-
-        $parsed = ConvertFrom-PDPrinterIntuneDisplayName -DisplayName $name
-        if (-not $parsed.IsPrinter) { continue }
 
         $created = Get-PDGraphPropertyValue -Object $item -Name 'createdDateTime'
         $createdText = ''
@@ -363,17 +369,134 @@ function Get-PDIntunePrinterApps {
         }
 
         $apps += [pscustomobject]@{
-            AppId       = $id
+            Id          = $id
             DisplayName = $name
-            PrinterName = $parsed.PrinterName
-            Department  = $parsed.Department
-            DeployMode  = $parsed.DeployMode
-            Version     = $parsed.Version
+            ODataType   = [string](Get-PDGraphPropertyValue -Object $item -Name '@odata.type')
             Created     = $createdText
         }
     }
 
+    return $apps
+}
+
+function Get-PDIntunePrinterApps {
+    <#
+        .SYNOPSIS
+        Every Intune app whose display name is one Setup would give a printer, all deploy modes.
+
+        .OUTPUTS
+        { AppId; DisplayName; PrinterName; Department; DeployMode; Version; Created } sorted by
+        PrinterName, then DeployMode.
+    #>
+    param(
+        [AllowNull()][object]$AuthContext,
+        [string]$Stage = 'ListPrinters'
+    )
+
+    $apps = @()
+    foreach ($item in @(Get-PDIntuneAppListByPrefix -Prefix ([string]$script:PDBulk.DisplayNamePrefix) -AuthContext $AuthContext -Stage $Stage -Description 'printer app list')) {
+        $parsed = ConvertFrom-PDPrinterIntuneDisplayName -DisplayName $item.DisplayName
+        if (-not $parsed.IsPrinter) { continue }
+
+        $apps += [pscustomobject]@{
+            AppId       = $item.Id
+            DisplayName = $item.DisplayName
+            PrinterName = $parsed.PrinterName
+            Department  = $parsed.Department
+            DeployMode  = $parsed.DeployMode
+            Version     = $parsed.Version
+            Created     = $item.Created
+        }
+    }
+
     return @($apps | Sort-Object PrinterName, DeployMode, DisplayName)
+}
+
+function ConvertFrom-PDWindowsAppIntuneDisplayName {
+    <#
+        .SYNOPSIS
+        The inverse of the name WindowsApp--InTune-Setup gives a Windows app:
+          PRODUCTION:  APP: <ApplicationName>
+          other modes: APP: <ApplicationName> [MODE: <mode>] [VER: <commit>]
+        Never throws.
+
+        .OUTPUTS
+        { IsWindowsApp; AppName; DeployMode; Version }. Case-sensitive "APP: ", like Setup writes it.
+        The mode is the printer parser's class ([A-Z][A-Z0-9-]*); a name without a valid
+        " [MODE: x] [VER: y]" tail is PRODUCTION and keeps any bracketed text in AppName.
+    #>
+    param([AllowNull()][object]$DisplayName)
+
+    $result = [pscustomobject]@{ IsWindowsApp = $false; AppName = ''; DeployMode = ''; Version = '' }
+
+    try {
+        if ($DisplayName -isnot [string] -or [string]::IsNullOrWhiteSpace($DisplayName)) { return $result }
+
+        $found = [regex]::Match($DisplayName.Trim(), '^APP: (?<rest>.+)\z')
+        if (-not $found.Success) { return $result }
+
+        $rest = $found.Groups['rest'].Value
+        $mode = 'PRODUCTION'
+        $version = ''
+
+        $tail = [regex]::Match($rest, '^(?<name>.+?) \[MODE: (?<mode>[A-Z][A-Z0-9-]*)\] \[VER: (?<ver>[^\[\]]*)\]\z')
+        if ($tail.Success) {
+            $rest    = $tail.Groups['name'].Value
+            $mode    = $tail.Groups['mode'].Value
+            $version = $tail.Groups['ver'].Value
+        }
+
+        if ([string]::IsNullOrWhiteSpace($rest)) { return $result }
+
+        $result.IsWindowsApp = $true
+        $result.AppName      = $rest.Trim()
+        $result.DeployMode   = $mode
+        $result.Version      = $version
+    } catch {
+        $result = [pscustomobject]@{ IsWindowsApp = $false; AppName = ''; DeployMode = ''; Version = '' }
+    }
+
+    return $result
+}
+
+function Get-PDIntuneWindowsApps {
+    <#
+        .SYNOPSIS
+        Every Intune Win32 app whose display name starts with "APP: " (the prefix
+        WindowsApp--InTune-Setup gives), all deploy modes.
+
+        .DESCRIPTION
+        An app whose @odata.type says it is not a Win32 app is left out. One without an @odata.type
+        is kept: the prefix is PowerDeploy's, and Graph reports the type of every app it lists.
+
+        .OUTPUTS
+        { AppId; DisplayName; AppName; DeployMode; Version; Created } sorted by AppName, then DeployMode.
+    #>
+    param(
+        [AllowNull()][object]$AuthContext,
+        [string]$Stage = 'ListApps'
+    )
+
+    $win32 = ([string]$script:PDBulk.Win32AppODataType).TrimStart('#')
+    $apps = @()
+    foreach ($item in @(Get-PDIntuneAppListByPrefix -Prefix ([string]$script:PDBulk.AppDisplayNamePrefix) -AuthContext $AuthContext -Stage $Stage -Description 'Windows app list')) {
+        $type = ([string]$item.ODataType).Trim().TrimStart('#')
+        if (-not [string]::IsNullOrWhiteSpace($type) -and $type -ine $win32) { continue }
+
+        $parsed = ConvertFrom-PDWindowsAppIntuneDisplayName -DisplayName $item.DisplayName
+        if (-not $parsed.IsWindowsApp) { continue }
+
+        $apps += [pscustomobject]@{
+            AppId       = $item.Id
+            DisplayName = $item.DisplayName
+            AppName     = $parsed.AppName
+            DeployMode  = $parsed.DeployMode
+            Version     = $parsed.Version
+            Created     = $item.Created
+        }
+    }
+
+    return @($apps | Sort-Object AppName, DeployMode, DisplayName)
 }
 
 function Backup-PDIntuneApp {
@@ -883,30 +1006,51 @@ function Invoke-PDPrinterBulkCreate {
 # Bulk delete
 # ---------------------------------------------------------------------------
 
-function New-PDPrinterDeleteSheet {
-    <# One row per printer app, Delete blank. #>
-    param([AllowEmptyCollection()][object[]]$Apps)
+function New-PDIntuneAppDeleteSheet {
+    <# One row per app with exactly these columns, Delete blank (nothing is pre-marked). #>
+    param(
+        [AllowEmptyCollection()][object[]]$Apps,
+        [Parameter(Mandatory = $true)][string[]]$Columns
+    )
 
     $rows = @()
     foreach ($app in @($Apps)) {
-        $rows += [pscustomobject]@{
-            Delete      = ''
-            DisplayName = [string]$app.DisplayName
-            PrinterName = [string]$app.PrinterName
-            DeployMode  = [string]$app.DeployMode
-            Version     = [string]$app.Version
-            Created     = [string]$app.Created
-            AppId       = [string]$app.AppId
+        $row = [ordered]@{}
+        foreach ($column in $Columns) {
+            if ($column -eq 'Delete') { $row[$column] = ''; continue }
+            $row[$column] = Get-PDBulkCell -Row $app -Name $column
         }
+        $rows += [pscustomobject]$row
     }
     return $rows
 }
 
+function New-PDPrinterDeleteSheet {
+    <# One row per printer app, Delete blank. #>
+    param([AllowEmptyCollection()][object[]]$Apps)
+    return @(New-PDIntuneAppDeleteSheet -Apps $Apps -Columns $script:PDBulk.DeleteColumns)
+}
+
+function New-PDWindowsAppDeleteSheet {
+    <# One row per Windows app, Delete blank. #>
+    param([AllowEmptyCollection()][object[]]$Apps)
+    return @(New-PDIntuneAppDeleteSheet -Apps $Apps -Columns $script:PDBulk.AppDeleteColumns)
+}
+
 function Resolve-PDPrinterDeleteSelection {
+    <# The printer name for Resolve-PDIntuneAppDeleteSelection (the rule is the same for every app). #>
+    param(
+        [AllowEmptyCollection()][object[]]$Rows,
+        [AllowEmptyCollection()][object[]]$CurrentApps
+    )
+    return (Resolve-PDIntuneAppDeleteSelection -Rows $Rows -CurrentApps $CurrentApps)
+}
+
+function Resolve-PDIntuneAppDeleteSelection {
     <#
         .SYNOPSIS
-        The rows marked Delete, matched to a FRESH list of printer apps by AppId only (never by name:
-        two apps can share a name, and a name in the sheet may have been edited).
+        The rows marked Delete, matched to a FRESH list of apps by AppId only (never by name: two
+        apps can share a name, and a name in the sheet may have been edited).
 
         .OUTPUTS
         { Selected = current app objects to delete; Gone = marked AppIds no longer in Intune;
@@ -940,18 +1084,20 @@ function Resolve-PDPrinterDeleteSelection {
     return $selection
 }
 
-function Invoke-PDPrinterBulkDelete {
+function Invoke-PDIntuneAppBulkDelete {
     <#
         .SYNOPSIS
-        Backs up and deletes each selected app. Never throws; a failure on one app never stops the rest.
+        Backs up and deletes each selected app by AppId. Never throws; a failure on one app never
+        stops the rest. Devices keep whatever the app installed: this only cleans up Intune.
         .OUTPUTS
-        Result rows (columns $script:PDBulk.DeleteResultColumns).
+        Result rows with exactly ResultColumns: the app's own columns, then Result, BackupFile, Error.
     #>
     param(
         [AllowEmptyCollection()][object[]]$Apps,
         [Parameter(Mandatory = $true)][string]$BackupFolder,
         [AllowNull()][object]$AuthContext,
-        [AllowNull()][scriptblock]$OnProgress
+        [AllowNull()][scriptblock]$OnProgress,
+        [Parameter(Mandatory = $true)][string[]]$ResultColumns
     )
 
     $results = @()
@@ -962,18 +1108,53 @@ function Invoke-PDPrinterBulkDelete {
         $index++
         $outcome = Remove-PDIntuneAppWithBackup -AppId ([string]$app.AppId) -BackupFolder $BackupFolder -AuthContext $AuthContext
 
-        $row = [pscustomobject]@{
-            DisplayName = [string]$app.DisplayName
-            PrinterName = [string]$app.PrinterName
-            DeployMode  = [string]$app.DeployMode
-            AppId       = [string]$app.AppId
-            Result      = [string]$outcome.Result
-            BackupFile  = [string]$outcome.BackupFile
-            Error       = [string]$outcome.Error
+        $row = [ordered]@{}
+        foreach ($column in $ResultColumns) {
+            switch ($column) {
+                'Result'     { $row[$column] = [string]$outcome.Result }
+                'BackupFile' { $row[$column] = [string]$outcome.BackupFile }
+                'Error'      { $row[$column] = [string]$outcome.Error }
+                default      { $row[$column] = Get-PDBulkCell -Row $app -Name $column }
+            }
         }
+        $row = [pscustomobject]$row
         $results += $row
         if ($null -ne $OnProgress) { $null = & $OnProgress $index $total $row }
     }
 
     return $results
+}
+
+function Invoke-PDPrinterBulkDelete {
+    <#
+        .SYNOPSIS
+        Backs up and deletes each selected printer app. Never throws; a failure on one app never stops the rest.
+        .OUTPUTS
+        Result rows (columns $script:PDBulk.DeleteResultColumns).
+    #>
+    param(
+        [AllowEmptyCollection()][object[]]$Apps,
+        [Parameter(Mandatory = $true)][string]$BackupFolder,
+        [AllowNull()][object]$AuthContext,
+        [AllowNull()][scriptblock]$OnProgress
+    )
+
+    return @(Invoke-PDIntuneAppBulkDelete -Apps $Apps -BackupFolder $BackupFolder -AuthContext $AuthContext -OnProgress $OnProgress -ResultColumns $script:PDBulk.DeleteResultColumns)
+}
+
+function Invoke-PDWindowsAppBulkDelete {
+    <#
+        .SYNOPSIS
+        Backs up and deletes each selected Windows app. Never throws; a failure on one app never stops the rest.
+        .OUTPUTS
+        Result rows (columns $script:PDBulk.AppDeleteResultColumns).
+    #>
+    param(
+        [AllowEmptyCollection()][object[]]$Apps,
+        [Parameter(Mandatory = $true)][string]$BackupFolder,
+        [AllowNull()][object]$AuthContext,
+        [AllowNull()][scriptblock]$OnProgress
+    )
+
+    return @(Invoke-PDIntuneAppBulkDelete -Apps $Apps -BackupFolder $BackupFolder -AuthContext $AuthContext -OnProgress $OnProgress -ResultColumns $script:PDBulk.AppDeleteResultColumns)
 }
