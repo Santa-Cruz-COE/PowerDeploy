@@ -1451,7 +1451,7 @@ Function Printer--InTune-BulkCreate {
         Write-Log ""
 
         # Picking a handful out of many is easier from an all-unticked sheet.
-        $IncludeAll = Read-GraphUploadYesNo -Question 'Start with every printer ticked (Include = Y)?' -Default $true `
+        $IncludeAll = Read-GraphUploadYesNo -Question 'Start with every printer enabled?' -Default $true `
                                             -Note 'Answer n to start with none ticked, then tick only the printers you want.'
         Write-Log ""
 
