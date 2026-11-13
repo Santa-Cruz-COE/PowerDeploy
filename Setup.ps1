@@ -5613,7 +5613,7 @@ Function OrganizationRegistryEntries--InTune-Setup{
     Write-Log ""
     Write-Log "What do you want to do?" 'WARNING'
     Write-Log ""
-    Write-Log "     1 - Generate the registry scripts and set them up in Intune"
+    Write-Log "     1 - Generate the registry scripts and set them up (or replace them) in Intune"
     Write-Log "     2 - View and delete existing registry scripts in Intune"
     Write-Log ""
 
