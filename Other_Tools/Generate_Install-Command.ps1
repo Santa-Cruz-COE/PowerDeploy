@@ -116,6 +116,7 @@ function New-IntuneGitRunnerCommand {
     param(
         [string]$RepoNickName,
         [string]$RepoUrl,
+        [string]$RepoBranch = $script:RepoBranch, # Defaults to the script's -RepoBranch (itself "main" by default).
         [string]$TargetWorkingDirectory,
         [string]$ScriptPath,
         [hashtable]$ScriptParams,
@@ -127,6 +128,7 @@ function New-IntuneGitRunnerCommand {
     Write-Log ""
     Write-Log "RepoNickName: $RepoNickName"
     Write-Log "RepoUrl: $RepoUrl"
+    Write-Log "RepoBranch: $RepoBranch"
     Write-Log "TargetWorkingDirectory: $TargetWorkingDirectory"
     Write-Log "ScriptPath: $ScriptPath"
     Write-Log "ScriptParams: $ScriptParams"
@@ -138,6 +140,22 @@ function New-IntuneGitRunnerCommand {
     if ($RequireOrgKeys -and ($RequireOrgKeys -cnotin @('Printers', 'Applications'))) {
         Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END | Invalid RequireOrgKeys value: '$RequireOrgKeys'. Allowed: 'Printers', 'Applications', or empty." "ERROR"
         Exit 1
+    }
+
+    # Branch switch for the Git-Runner command line. Git-Runner defaults to "main" and only runs
+    # "git switch" for any other branch, so a missing switch makes a non-main install run whatever
+    # branch the device's local repo is on. "main" (or empty) adds nothing, so main-branch command
+    # lines stay exactly as before. The name goes inside single quotes in the -Command string, so only
+    # characters that cannot break that quoting are accepted. -cmatch (case-sensitive) and \z (true end
+    # of string; $ would also accept a trailing line feed) keep the check exact. A leading '-' is refused
+    # because Git-Runner passes the name to "git switch", where it would be read as an option.
+    $RepoBranchArg = ''
+    if ($RepoBranch -and ($RepoBranch -ne 'main')) {
+        if ($RepoBranch -cnotmatch '^[A-Za-z0-9._/][A-Za-z0-9._/-]*\z') {
+            Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END | Invalid RepoBranch value: '$RepoBranch'. Allowed characters: letters, digits, '.', '_', '/', '-' (not as the first character)." "ERROR"
+            Exit 1
+        }
+        $RepoBranchArg = " -RepoBranch '$RepoBranch'"
     }
 
     Write-Log "Function parameters received:"
@@ -153,12 +171,12 @@ function New-IntuneGitRunnerCommand {
         
         # Build the command
         $command = @"
-%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& '.\Git-Runner_TEMPLATE.ps1' -RepoNickName '$RepoNickName' -RepoUrl '$RepoUrl' -WorkingDirectory '$TargetWorkingDirectory' -ScriptPath '$ScriptPath' -ScriptParamsBase64 '$paramsBase64'"
+%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& '.\Git-Runner_TEMPLATE.ps1' -RepoNickName '$RepoNickName' -RepoUrl '$RepoUrl'$RepoBranchArg -WorkingDirectory '$TargetWorkingDirectory' -ScriptPath '$ScriptPath' -ScriptParamsBase64 '$paramsBase64'"
 "@
     } else {
         # for a no param script
         $command = @"
-%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& '.\Git-Runner_TEMPLATE.ps1' -RepoNickName '$RepoNickName' -RepoUrl '$RepoUrl' -WorkingDirectory '$TargetWorkingDirectory' -ScriptPath '$ScriptPath'"
+%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& '.\Git-Runner_TEMPLATE.ps1' -RepoNickName '$RepoNickName' -RepoUrl '$RepoUrl'$RepoBranchArg -WorkingDirectory '$TargetWorkingDirectory' -ScriptPath '$ScriptPath'"
 "@
     }
 
