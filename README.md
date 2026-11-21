@@ -195,7 +195,7 @@ Instead of copying the wizard's output into the Intune portal by hand, Setup can
 **Org registry scripts** — `OrganizationRegistryEntries--InTune-Setup` builds the two Intune objects that write the organization registry values (`HKLM\SOFTWARE\PowerDeploy`) on devices:
 
 - the **Intune Remediation** `POWERDEPLOY ORG REGISTRY: Remediation`. It runs every hour and keeps the values current (SAS key rotation, drift).
-- the **Intune Platform Script** `POWERDEPLOY ORG REGISTRY: Platform Script`. It is self-contained (no Git, no network on the device), and Intune runs it before Win32 apps, so during Autopilot the values are in place before PowerDeploy's apps and printers install. Only device groups run it during the Autopilot device phase.
+- the **Intune Platform Script** `POWERDEPLOY ORG REGISTRY: Platform Script`. It is self-contained (no Git, no network on the device), and Intune runs it before Win32 apps. Device groups (or /AllDevices) are recommended: during Autopilot, device groups run it in the device setup phase, before PowerDeploy's apps and printers install. User groups run it later, in the account setup phase, so apps and printers assigned to device groups could install before the values are in place.
 
 Other deploy modes add ` [MODE: <mode>] [VER: <commit>]` to the names. Choose both or either one, then **Guided manual steps** or **Automatic via API** (offered when this PC has a client secret). Automatic via API:
 

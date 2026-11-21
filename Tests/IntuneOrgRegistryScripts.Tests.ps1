@@ -1177,12 +1177,12 @@ Add-TestCase 'O71' 'wizard text: product voice, one name per thing, the agreed t
     }
     $text = $strings -join "`n"
 
-    foreach ($required in @('1 - Generate the registry scripts and set them up in Intune', '2 - View and delete existing registry scripts in Intune',
+    foreach ($required in @('1 - Generate the registry scripts and set them up (or replace them) in Intune', '2 - View and delete existing registry scripts in Intune',
                             'What do you want to set up in Intune?', '1 - Intune Remediation and Intune Platform Script (both)', '2 - Intune Remediation only',
                             '3 - Intune Platform Script only', 'How do you want to set it up?', '1 - Guided manual steps', '2 - Automatic via API',
                             'UPLOAD REGISTRY REMEDIATION TO INTUNE', 'UPLOAD REGISTRY PLATFORM SCRIPT TO INTUNE', 'Devices > Scripts and remediations',
                             'Enter the numbers to delete, separated by commas, or press Enter to delete nothing.', '(just uploaded)',
-                            'Only device groups run the Intune Platform Script during the Autopilot device phase.',
+                            'NOTE: Device groups (or /AllDevices) are recommended.', 'Scripts assigned to user groups run later, in the account setup phase',
                             'The registry script files have been created.', 'Detection script file:', 'Remediation script file:', 'Platform script file:',
                             'Packaging the remediation script as an .intunewin package...', 'Do you need the .intunewin package of the remediation script?', 'The .intunewin package has been created at: ', '(for example: Test Devices; Lab Devices)')) {
         Assert-True ($text.Contains($required)) "the wizard says: $required"
@@ -1261,7 +1261,7 @@ Add-TestCase 'O80' 'wizard, automatic setup via API: plan, groups, overlap warni
     Assert-Like '*Intune Platform Script: none exists for deploy mode PRODUCTION, so a new one will be created.*' $log 'the plan is stated'
     Assert-Like ('*Intune Remediation: the existing one will be updated: POWERDEPLOY ORG REGISTRY: Remediation (' + $rem + ')*') $log 'with the existing object'
     Assert-Like '*The Intune Platform Script is new, so it needs groups.*' $log 'why Enter cannot keep'
-    Assert-Like '*Only device groups run the Intune Platform Script during the Autopilot device phase.*' $log 'the device group note'
+    Assert-Like '*NOTE: Device groups (or /AllDevices) are recommended.*account setup phase*' $log 'the device group note'
     Assert-Like ('*Other registry scripts in Intune are already assigned*' + $other + '*IT PCs*') $log 'the overlap is shown with its ID and group'
     Assert-Like '*Enter the groups to assign the Intune Remediation and the Intune Platform Script to*' $log 'one order, the order of the menu'
     Assert-Like '*REVIEW - nothing has been changed in Intune yet*' $log 'the review'

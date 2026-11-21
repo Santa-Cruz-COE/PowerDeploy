@@ -5079,7 +5079,7 @@ Function Show-OrgRegistryGuidedPlatformScript {
         Write-Log ""
         Write-Log "   9. Click Next to go to the Scope tags page. Add scope tags if the tenant uses them."
         Write-Log ""
-        Write-Log "  10. Click Next to go to the Assignments page. Assign it to device groups: only device groups run the Intune Platform Script during the Autopilot device phase, before Win32 apps install. Start with a small test group of devices."
+        Write-Log "  10. Click Next to go to the Assignments page. Device groups (or All devices) are recommended: during Autopilot, device groups run the Intune Platform Script in the device setup phase, before PowerDeploy's apps and printers install. User groups run it later, in the account setup phase. Start with a small test group of devices."
         Write-Log ""
         Write-Log "  11. Click Next, then ""Add""."
         Write-Log ""
@@ -5100,7 +5100,7 @@ Function Show-OrgRegistryGuidedPlatformScript {
         Write-Log "        Enforce script signature check: No"
         Write-Log "        Run script in 64-bit PowerShell host: Yes"
         Write-Log ""
-        Write-Log "   3. Assignments: check that it is assigned to device groups. Only device groups run it during the Autopilot device phase."
+        Write-Log "   3. Assignments: device groups (or All devices) are recommended. During Autopilot, device groups run it in the device setup phase, before PowerDeploy's apps and printers install. User groups run it later, in the account setup phase."
         Write-Log ""
         Write-Log "   4. Click ""Review + save"", then ""Save""."
         Write-Log ""
@@ -5237,7 +5237,7 @@ Function Read-OrgRegistryAssignment {
         }
 
         $Note = @()
-        if ($Types -contains 'PlatformScript') { $Note += "Only device groups run the Intune Platform Script during the Autopilot device phase." }
+        if ($Types -contains 'PlatformScript') { $Note += "NOTE: Device groups (or /AllDevices) are recommended. During Autopilot, scripts assigned to device groups run in the device setup phase, before PowerDeploy's apps and printers install. Scripts assigned to user groups run later, in the account setup phase, so PowerDeploy apps and printers assigned to device groups could install before the organization registry values are in place." }
         if ($KeepOption.Available) { $Note += "Press Enter to keep the current assignments, or type exit to cancel." }
         else { $Note += "Type exit to cancel." }
 

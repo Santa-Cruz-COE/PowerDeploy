@@ -37,7 +37,9 @@
       - Run this script using the logged on credentials: No   (runs as SYSTEM)
       - Enforce script signature check:                 No
       - Run script in 64-bit PowerShell host:            Yes
-      - Assign to DEVICE groups (the Autopilot device phase only runs device-targeted scripts).
+      - Assign to device groups (recommended). During Autopilot, device groups run it in the device
+        setup phase, before PowerDeploy's apps and printers install. User groups run it later, in
+        the account setup phase.
 
     Output and log: value NAMES and written / already correct / verified / FAILED only, NEVER the
     values. Intune copies platform script output into
