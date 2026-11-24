@@ -238,38 +238,6 @@ function Get-AzureTokenSilently {
         # $token
         # pause
 
-        ##
-
-        <#
-        # Use the token directly with REST API
-            Try{
-                
-                Write-Log "Installing Azure CLI"
-                #$ProgressPreference = 'SilentlyContinue'; 
-                #Invoke-WebRequest -Uri https://aka.ms/installazurecliwindows -OutFile .\AzureCLI.msi; Start-Process msiexec.exe -Wait -ArgumentList '/I AzureCLI.msi /quiet'; Remove-Item .\AzureCLI.msi
-
-                winget uninstall Microsoft.AzureCLI
-
-                winget install -e --id Microsoft.AzureCLI
-
-                Write-Log "Getting token"
-                $token = Get-AzureTokenSilently
-                $headers = @{
-                    'Authorization' = "Bearer $token"
-                    'x-ms-version' = '2020-04-08'
-                }
-
-                # Download blob using REST API
-                $uri = 'https://genericdeploy.blob.core.windows.net/applications/Escape/Escape_Online_5_Client_SC_PROD.msi?sp=r&st=2025-11-04T18:35:35Z&se=2025-11-05T02:50:35Z&spr=https&sv=2024-11-04&sr=b&sig=DqJPQYPyAtZQ%2Fres5KohGX56Bdhs1ZoHB7%2BY0xpMnJ8%3D'
-                Invoke-RestMethod -Uri $uri -Headers $headers -OutFile "C:\ProgramData\TEST\Temp\zz.msi"
-            } Catch {
-
-                "duhhhh: $_"
-            }
-            Pause
-        #>
-        ##
-
 
 ##########
 ## Main ##

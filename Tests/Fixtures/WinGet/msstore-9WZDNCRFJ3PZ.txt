@@ -1,0 +1,34 @@
+Found Company Portal [9WZDNCRFJ3PZ]
+Version: Unknown
+Publisher: Microsoft Corporation
+Publisher Url: http://go.microsoft.com/fwlink/?LinkId=273865
+Publisher Support Url: http://go.microsoft.com/fwlink/?LinkId=273866
+Description:
+  Microsoft Intune helps organizations manage access to corporate apps, data, and resources. Company Portal is the app that lets you, as an employee of your company, securely access those resources.
+  
+  Before you can use this app, make sure your IT admin has set up your work account. Your company must also have a subscription to Microsoft Intune.
+  
+  Company Portal helps simplify the tasks you need to do for work:
+  
+  - Enroll your device to access corporate resources, including Office, email, and OneDrive for Business
+  - Sign in to corporate resources with company-issued certificates
+  - Reduce the number of times you need to sign in to corporate resources with single sign-on
+  - Browse and install approved business apps from your IT department or the Microsoft Store for Business
+  - View and manage your enrolled devices – and wipe them if they get lost or stolen
+  - Get help directly from your IT department through available contact information
+   
+  A note about Intune: every organization has different access requirements, and will use Intune in ways that they determine will best manage their information. Some functionality might be unavailable in certain countries. If you have questions about how this app is being used within your organization, your company’s IT administrator should have those answers for you. Microsoft, your network provider, and your device’s manufacturer do not know how Intune will be used by your organization.
+License: http://go.microsoft.com/fwlink/?LInkId=518263
+Privacy Url: http://go.microsoft.com/fwlink/?LinkID=316999
+Copyright: © 2025. Microsoft. All rights reserved.
+Agreements:
+  Category: Business
+  Pricing: Free
+  Free Trial: No
+  Terms of Transaction: https://aka.ms/microsoft-store-terms-of-transaction
+  Seizure Warning: https://aka.ms/microsoft-store-seizure-warning
+  Store License Terms: https://aka.ms/microsoft-store-license
+Installer:
+  Installer Type: msstore
+  Store Product Id: 9WZDNCRFJ3PZ
+  Offline Distribution Supported: true

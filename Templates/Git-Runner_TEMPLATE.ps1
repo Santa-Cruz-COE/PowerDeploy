@@ -68,6 +68,12 @@
     This parameter is automatically decoded into a parameter string for the target script.
     How do you use this parameter? The Generate_Custom-Script_FromTemplate.ps1 will do it for you automatically! See that script for further instuctions.
 
+.PARAMETER RequireOrgKeys
+    Optional. 'Printers' or 'Applications'. Before Git is installed or the repo is cloned, checks that the organization
+    registry values that kind of install needs are present (HKLM\SOFTWARE\PowerDeploy, 64-bit view). If any is missing,
+    exits 1618 so Intune retries the install. Only value names are logged, never the values.
+    Empty (default) = no check. Any other value exits 1.
+
 .EXAMPLE
     .\Git-Runner_TEMPLATE.ps1 -RepoNickName "Win-PowerDeploy" -RepoURL "https://github.com/Santa-Cruz-COE/PowerDeploy.git" -ScriptPath "Uninstallers\General_Uninstaller.ps1" -WorkingDirectory "C:\ProgramData\PowerDeploy" -ScriptParams '-AppName "7-zip" -UninstallType "All" -WorkingDirectory "C:\ProgramData\PowerDeploy"'
     
@@ -113,6 +119,9 @@ param(
     [Parameter(Mandatory=$false)]
     [string]$ScriptParamsBase64, # Base64 encoded params for better Intune compatibility,
     
+    [Parameter(Mandatory=$false)]
+    [string]$RequireOrgKeys='', # Optional: 'Printers' or 'Applications'. Exit 1618 (Intune retry) if the org registry values that install needs are missing. Empty = no check.
+
     [Parameter(ValueFromRemainingArguments=$true)]
     $ScriptParams # Params to pass to the target script. Example for General_Uninstaller.ps1: -ScriptParams '-AppName "7-zip" -UninstallType "All" -WorkingDirectory "C:\ProgramData\COMPANY_NAME\Logs"'
 
@@ -549,8 +558,76 @@ Write-Log "InitOnly: $InitOnly"
 Write-Log "installGitOnly: $installGitOnly"
 Write-Log "StashChanges: $StashChanges"
 Write-Log "ScriptParams: $ScriptParams"
+Write-Log "RequireOrgKeys: $RequireOrgKeys"
 
 Write-Log "++++++++++++++++++++++"
+
+##
+# Organization registry values pre-check (before Git install/clone, so a device without them stops in under a second)
+# Empty $RequireOrgKeys = no check. Generated custom scripts have the param() block stripped and always get
+# $RequireOrgKeys injected, so a leftover session/global variable can never turn this on.
+# Only value names and present/missing are logged, never the values (the log folder may not be ACL-locked yet).
+if ($RequireOrgKeys) {
+
+    Write-Log "Checking organization registry values required for: $RequireOrgKeys"
+
+    # Explicitly reset: never append to a leftover variable via dynamic scoping
+    $RequiredOrgValues = @()
+    $MissingOrgValues = @()
+
+    switch ($RequireOrgKeys) {
+        'Printers'     { $RequiredOrgValues = @('General\StorageAccountName', 'Printers\PrinterContainerSASkey', 'Printers\PrinterDataJSONpath') }
+        'Applications' { $RequiredOrgValues = @('General\StorageAccountName', 'Applications\ApplicationContainerSASkey', 'Applications\ApplicationDataJSONpath') }
+        default {
+            Write-Log "++++++++++++++++++++++"
+            Write-Log "SCRIPT: $ThisFileName | END | Unknown RequireOrgKeys value: '$RequireOrgKeys'. Expected 'Printers' or 'Applications' (or empty for no check)." "ERROR"
+            Exit 1
+        }
+    }
+
+    # Read-only, explicit 64-bit view (matches Configure-Registry.ps1). Never creates the key.
+    $OrgBaseKey = $null
+    try {
+        $OrgBaseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+
+        foreach ($OrgValue in $RequiredOrgValues) {
+
+            $OrgSubKeyName = 'SOFTWARE\PowerDeploy\' + ($OrgValue -split '\\')[0]
+            $OrgValueName = ($OrgValue -split '\\')[1]
+            $OrgValueData = $null
+            $OrgSubKey = $null
+
+            try {
+                $OrgSubKey = $OrgBaseKey.OpenSubKey($OrgSubKeyName, $false)
+                if ($OrgSubKey) { $OrgValueData = $OrgSubKey.GetValue($OrgValueName, $null) }
+            } catch {
+                Write-Log "   $OrgValue : could not be read ($($_.Exception.GetType().Name))" "WARNING"
+                $OrgValueData = $null
+            } finally {
+                if ($OrgSubKey) { $OrgSubKey.Close() }
+            }
+
+            if ([string]::IsNullOrWhiteSpace([string]$OrgValueData)) {
+                $MissingOrgValues += $OrgValue
+                Write-Log "   $OrgValue : missing" "WARNING"
+            } else {
+                Write-Log "   $OrgValue : present"
+            }
+        }
+    } finally {
+        if ($OrgBaseKey) { $OrgBaseKey.Close() }
+    }
+
+    if ($MissingOrgValues.Count -gt 0) {
+        Write-Log "Missing organization registry values (HKLM\SOFTWARE\PowerDeploy): $($MissingOrgValues -join ', ')" "WARNING"
+        Write-Log "++++++++++++++++++++++"
+        Write-Log "SCRIPT: $ThisFileName | END | Organization registry values not present yet. Exiting with 1618 so Intune retries this install." "WARNING"
+        Exit 1618
+    }
+
+    Write-Log "All required organization registry values are present." "SUCCESS"
+
+}
 
 ##
 # Check if git is installed
