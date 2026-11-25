@@ -203,6 +203,18 @@ $SecurityManagerScriptPath = "$WorkingDirectory\$RepoNickName\Other_Tools\Securi
 # Registry change script path
 $RegistryChangeScriptPath = "$WorkingDirectory\$RepoNickName\Configurators\Configure-Registry.ps1"
 
+# Git for Windows install (CheckAndInstall-Git). Every step that runs while the install mutex is held has a
+# wall-clock limit, so one stuck run cannot hold the mutex for long. Any "Git cannot be installed right now"
+# outcome (mutex wait, latest-release lookup, download, installer still running) exits 1618 so Intune retries
+# the install. The latest release is always looked up at run time; no Git version is built in.
+$GitInstallMutexName = "Global\PowerDeploy_GitInstall"
+$GitInstallMutexWaitSec = 300      # Wait for another run's Git install before giving up (exit 1618)
+$GitReleaseLookupTimeoutSec = 30   # Lookup of the latest release tag (whole request)
+$GitLatestTagUrl = "https://gitforwindows.org/latest-tag.txt"   # Plain text: vX.Y.Z.windows.N
+$GitReleaseDownloadBaseUrl = "https://github.com/git-for-windows/git/releases/download"   # + /<tag>/<installer file>
+$GitDownloadTimeoutSec = 300       # Whole installer download (connect, headers and body)
+$GitInstallerTimeoutSec = 600      # Git installer run; after this it is left running and the run exits 1618
+
 # Ensure RepoUrl starts with https://
 $RepoUrl = if ($RepoUrl -notlike "https://*") { "https://$RepoUrl" } else { $RepoUrl }
 
@@ -362,6 +374,95 @@ function Test-PathSyntaxValidity {
 
 }
 
+function Get-PDRunningGitInstaller {
+    # Returns every running Git installer process on the device, from any path: any deploy mode's working
+    # directory, since the install mutex is device-wide. git-installer.exe is the file Git-Runner downloads;
+    # git-installer.tmp is the child process its Inno Setup installer starts (.NET drops only ".exe" from
+    # process names, so the child is reported as "git-installer.tmp").
+    param([string[]]$ProcessName = @('git-installer', 'git-installer.tmp'))
+
+    return @(Get-Process -Name $ProcessName -ErrorAction SilentlyContinue)
+}
+
+function Invoke-PDHttpGet {
+    # GET $Url and return the response body as a byte array, with a hard wall-clock limit on the whole
+    # transfer. In Windows PowerShell 5.1, Invoke-WebRequest/Invoke-RestMethod -TimeoutSec do not bound the
+    # whole body read (a chunked body that trickles or stalls ran far past the limit when tested), so
+    # HttpClient is used: its Timeout covers the
+    # full body read (default ResponseContentRead behavior). A generic User-Agent is always sent (some
+    # servers reject requests without one). Throws on any failure, non-success HTTP status, or timeout.
+    param(
+        [string]$Url,
+        [int]$TimeoutSec
+    )
+
+    Add-Type -AssemblyName System.Net.Http
+    $client = New-Object System.Net.Http.HttpClient
+    try {
+        $client.Timeout = [TimeSpan]::FromSeconds($TimeoutSec)
+        $client.DefaultRequestHeaders.UserAgent.ParseAdd('PowerDeploy-GitRunner')
+        $response = $client.GetAsync($Url).GetAwaiter().GetResult()
+        try {
+            if (-not $response.IsSuccessStatusCode) {
+                throw "HTTP $([int]$response.StatusCode) $($response.ReasonPhrase)"
+            }
+            $bytes = $response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
+        } finally {
+            $response.Dispose()
+        }
+    } finally {
+        $client.Dispose()
+    }
+    return ,$bytes
+}
+
+function Get-PDLatestGitInstaller {
+    # Reads the latest Git for Windows release tag (plain text, "vX.Y.Z.windows.N") from $TagUrl within
+    # $TimeoutSec for the whole request, and builds the 64-bit installer URL from it:
+    #   vX.Y.Z.windows.1 -> <DownloadBaseUrl>/vX.Y.Z.windows.1/Git-X.Y.Z-64-bit.exe
+    #   vX.Y.Z.windows.N -> <DownloadBaseUrl>/vX.Y.Z.windows.N/Git-X.Y.Z.N-64-bit.exe (N other than 1)
+    # The tag goes into a URL, so it must match the pattern exactly: case-sensitive, ASCII digits only ([0-9];
+    # .NET's \d would also accept other scripts' digits), nothing else.
+    # Returns Tag and Url. Throws on any failure, timeout, or text that is not a release tag.
+    param(
+        [string]$TagUrl,
+        [string]$DownloadBaseUrl,
+        [int]$TimeoutSec
+    )
+
+    $bytes = Invoke-PDHttpGet -Url $TagUrl -TimeoutSec $TimeoutSec
+    $text = [System.Text.Encoding]::UTF8.GetString($bytes).TrimStart([char]0xFEFF).Trim()
+    $tagMatch = [regex]::Match($text, '^v([0-9]+)\.([0-9]+)\.([0-9]+)\.windows\.([0-9]+)\z')
+    if (-not $tagMatch.Success) {
+        $shown = $text
+        if ($shown.Length -gt 40) { $shown = $shown.Substring(0, 40) + '...' }
+        $shown = $shown -replace '[^A-Za-z0-9 ._-]', '?'
+        throw "The latest-tag text is not a Git for Windows release tag: '$shown'"
+    }
+
+    $version = '{0}.{1}.{2}' -f $tagMatch.Groups[1].Value, $tagMatch.Groups[2].Value, $tagMatch.Groups[3].Value
+    $build = $tagMatch.Groups[4].Value
+    if ($build -eq '1') { $fileName = "Git-$version-64-bit.exe" } else { $fileName = "Git-$version.$build-64-bit.exe" }
+
+    return [pscustomobject]@{
+        Tag = $text
+        Url = "$($DownloadBaseUrl.TrimEnd('/'))/$text/$fileName"
+    }
+}
+
+function Save-PDGitInstaller {
+    # Downloads $Url to $OutFile within $TimeoutSec for the whole transfer (see Invoke-PDHttpGet).
+    # The file is written only after the full body has arrived. Throws on any failure or timeout.
+    param(
+        [string]$Url,
+        [string]$OutFile,
+        [int]$TimeoutSec
+    )
+
+    $bytes = Invoke-PDHttpGet -Url $Url -TimeoutSec $TimeoutSec
+    [System.IO.File]::WriteAllBytes($OutFile, $bytes)
+}
+
 function CheckAndInstall-Git {
 
     # Refresh PATH from the registry before checking — this process may have started before a
@@ -372,16 +473,17 @@ function CheckAndInstall-Git {
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
         Write-Log "Git not found. Acquiring mutex lock for installation..." "WARNING"
 
-        $mutexName = "Global\PowerDeploy_GitInstall"
+        $mutexName = $GitInstallMutexName
         $mutex = $null
         $hasHandle = $false
 
+        # Every "exit" below still runs the finally block, which releases (only if held) and disposes the mutex.
         try {
             $mutex = New-Object System.Threading.Mutex($false, $mutexName)
 
-            Write-Log "Waiting for mutex lock (timeout: 300s)..."
+            Write-Log "Waiting for mutex lock (timeout: $($GitInstallMutexWaitSec)s)..."
             try {
-                $hasHandle = $mutex.WaitOne(300000)
+                $hasHandle = $mutex.WaitOne($GitInstallMutexWaitSec * 1000)
             }
             catch [System.Threading.AbandonedMutexException] {
                 $hasHandle = $true
@@ -389,7 +491,9 @@ function CheckAndInstall-Git {
             }
 
             if (-not $hasHandle) {
-                throw "Timed out waiting for another Git installation to complete."
+                Write-Log "Timed out after $($GitInstallMutexWaitSec)s waiting for another Git installation to finish." "WARNING"
+                Write-Log "SCRIPT: $ThisFileName | END | Git is not available yet. Exiting with 1618 so Intune retries this install." "WARNING"
+                exit 1618
             }
 
             Write-Log "Mutex acquired. Checking Git again..."
@@ -403,10 +507,25 @@ function CheckAndInstall-Git {
                 return
             }
 
-            # Get latest release info from GitHub API
-            $latestRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/git-for-windows/git/releases/latest"
-            $asset = $latestRelease.assets | Where-Object { $_.name -like "*64-bit.exe" } | Select-Object -First 1
-            $downloadUrl = $asset.browser_download_url
+            # Get the latest release tag and build the installer URL. If that fails, exit 1618 so Intune retries.
+            # A wrong installer URL shows up as a failed download below, which also exits 1618.
+            $releaseTag = $null
+            $downloadUrl = $null
+            try {
+                $latestInstaller = Get-PDLatestGitInstaller -TagUrl $GitLatestTagUrl -DownloadBaseUrl $GitReleaseDownloadBaseUrl -TimeoutSec $GitReleaseLookupTimeoutSec
+                $downloadUrl = $latestInstaller.Url
+                $releaseTag = $latestInstaller.Tag
+            } catch {
+                $lookupError = $_.Exception
+                while ($lookupError.InnerException) { $lookupError = $lookupError.InnerException }
+                Write-Log "Could not get the latest Git for Windows release tag from $GitLatestTagUrl (time limit: $($GitReleaseLookupTimeoutSec)s) ($($lookupError.GetType().FullName): $($lookupError.Message))" "WARNING"
+            }
+
+            if (-not $downloadUrl) {
+                Write-Log "SCRIPT: $ThisFileName | END | The latest Git release tag is not available right now. Exiting with 1618 so Intune retries this install." "WARNING"
+                exit 1618
+            }
+
             $installerPath = "$WorkingDirectory\TEMP\git-installer.exe"
 
             if (!(Test-Path "$WorkingDirectory\TEMP")) {
@@ -414,11 +533,49 @@ function CheckAndInstall-Git {
                 New-Item -Path "$WorkingDirectory\TEMP" -ItemType "Directory" -Force
             }
 
-            Write-Log "Downloading latest Git version: $($latestRelease.tag_name)"
-            Invoke-WebRequest -Uri $downloadUrl -OutFile $installerPath -UseBasicParsing
+            # An installer left running by an earlier run (one that hit the installer time limit, in any deploy
+            # mode) is still working. Do not overwrite its file or start a second one; it is never stopped here.
+            $runningInstallers = @(Get-PDRunningGitInstaller)
+            if ($runningInstallers.Count -gt 0) {
+                Write-Log "A Git installer from an earlier attempt is still running (process ID: $(($runningInstallers | ForEach-Object { $_.Id }) -join ', ')). It is left running." "WARNING"
+                Write-Log "SCRIPT: $ThisFileName | END | Git installation not finished yet. Exiting with 1618 so Intune retries this install." "WARNING"
+                exit 1618
+            }
 
-            Write-Log "Installing Git..."
-            Start-Process -FilePath $installerPath -ArgumentList "/VERYSILENT", "/NORESTART" -Wait
+            Write-Log "Downloading Git $releaseTag from: $downloadUrl (time limit: $($GitDownloadTimeoutSec)s)"
+            try {
+                Save-PDGitInstaller -Url $downloadUrl -OutFile $installerPath -TimeoutSec $GitDownloadTimeoutSec
+            } catch {
+                $downloadError = $_.Exception
+                while ($downloadError.InnerException) { $downloadError = $downloadError.InnerException }
+                Write-Log "Git installer download failed or did not finish within $($GitDownloadTimeoutSec)s ($($downloadError.GetType().FullName): $($downloadError.Message))" "WARNING"
+                try {
+                    if (Test-Path -LiteralPath $installerPath) { Remove-Item -LiteralPath $installerPath -Force -ErrorAction Stop }
+                } catch {
+                    Write-Log "Could not remove the partial installer file at: $installerPath" "WARNING"
+                }
+                Write-Log "SCRIPT: $ThisFileName | END | Git could not be downloaded right now. Exiting with 1618 so Intune retries this install." "WARNING"
+                exit 1618
+            }
+
+            Write-Log "Installing Git (time limit: $($GitInstallerTimeoutSec)s)..."
+            $installerProcess = Start-Process -FilePath $installerPath -ArgumentList "/VERYSILENT", "/NORESTART" -PassThru -ErrorAction Stop
+            $null = $installerProcess.Handle # Windows PowerShell 5.1: holding the handle keeps ExitCode readable after the process ends
+
+            if (-not $installerProcess.WaitForExit($GitInstallerTimeoutSec * 1000)) {
+                # Deliberately not stopped: stopping the Git installer mid-install can leave a half-installed Git.
+                # The installer file is kept because the running installer uses it.
+                Write-Log "The Git installer (process ID: $($installerProcess.Id)) is still running after $($GitInstallerTimeoutSec)s. It is left running so it can finish; stopping it mid-install can leave a half-installed Git." "WARNING"
+                Write-Log "SCRIPT: $ThisFileName | END | Git installation not finished yet. Exiting with 1618 so Intune retries this install." "WARNING"
+                exit 1618
+            }
+
+            $installerExitCode = $installerProcess.ExitCode
+            if ($installerExitCode -eq 0) {
+                Write-Log "Git installer exited with code: $installerExitCode"
+            } else {
+                Write-Log "Git installer exited with code: $installerExitCode" "WARNING"
+            }
 
             Write-Log "Attempting to do cleanup..."
             if (Test-Path $installerPath) {
@@ -459,8 +616,19 @@ function CheckAndInstall-Git {
         }
     } else {
         Write-Log "Git is already installed."
+
+        # An installer kept by an earlier run that hit the installer time limit, and has since finished.
+        $leftoverInstallerPath = "$WorkingDirectory\TEMP\git-installer.exe"
+        if ((Test-Path -LiteralPath $leftoverInstallerPath) -and (@(Get-PDRunningGitInstaller).Count -eq 0)) {
+            try {
+                Remove-Item -LiteralPath $leftoverInstallerPath -Force -ErrorAction Stop
+                Write-Log "Removed leftover git installer file at: $leftoverInstallerPath"
+            } catch {
+                Write-Log "Could not remove leftover git installer file at: $leftoverInstallerPath"
+            }
+        }
     }
-    
+
 }
 
 Function Set-GitSafeDirectory {

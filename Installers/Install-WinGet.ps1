@@ -661,29 +661,9 @@ Function Install-WinGet {
 
     }
 
-    # Method 3
-    Function Install-WinGet-3-AppXpackage-latestWingetMsixBundle{
-    
-        # TODO: NEEDS TESTING
-        # AppXpackage from latestWingetMsixBundle. SOURCE: https://stackoverflow.com/questions/74166150/install-winget-by-the-command-line-powershell
-        Write-Log "Function: $($MyInvocation.MyCommand.Name) | Begin"
-
-        Try {
-            $progressPreference = 'silentlyContinue'
-            $latestWingetMsixBundleUri = $(Invoke-RestMethod https://api.github.com/repos/microsoft/winget-cli/releases/latest).assets.browser_download_url | Where-Object {$_.EndsWith(".msixbundle")}
-            $latestWingetMsixBundle = $latestWingetMsixBundleUri.Split("/")[-1]
-            Write-Log "Downloading winget to artifacts directory..."
-            Invoke-WebRequest -Uri $latestWingetMsixBundleUri -OutFile "./$latestWingetMsixBundle"
-            Invoke-WebRequest -Uri https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx -OutFile Microsoft.VCLibs.x64.14.00.Desktop.appx
-            Add-AppxPackage Microsoft.VCLibs.x64.14.00.Desktop.appx
-            Add-AppxPackage $latestWingetMsixBundle
-        } Catch {
-
-            Write-Log "Provisioning failed: $_" "ERROR"
-            throw "$_"
-
-        }
-    }
+    # Method 3 was removed: it asked api.github.com (60 requests per hour per public IP, shared by every
+    # device behind the same address) for the same bundle Method 2 downloads, and installed it for the
+    # current account only.
 
     # Method 4
     Function Install-WinGet-4-OfficialMethod{

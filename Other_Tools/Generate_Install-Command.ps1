@@ -180,18 +180,25 @@ function New-IntuneGitRunnerCommand {
 "@
     }
 
-    # Org registry values pre-check: added inside the -Command string, before its closing quote.
-    # Empty = the command above is left exactly as built.
-    # "; exit $LASTEXITCODE" is required: under powershell.exe -Command, Windows PowerShell 5.1 turns a
-    # script's "Exit 1618" into process exit code 1 (tested), and Intune would read that as Failed instead
-    # of Retry. Passing $LASTEXITCODE back out keeps 1618, 0 and 1 exactly; an uncaught error still gives 1.
-    if ($RequireOrgKeys) {
-        if (-not $command.EndsWith('"')) {
-            Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END | Unexpected command shape; cannot add -RequireOrgKeys." "ERROR"
-            Exit 1
-        }
-        $command = $command.Substring(0, $command.Length - 1) + " -RequireOrgKeys '$RequireOrgKeys'" + '; exit $LASTEXITCODE' + '"'
+    # Added inside the -Command string, before its closing quote: the org registry values pre-check (only when
+    # $RequireOrgKeys is set), then the exit-code ending below on EVERY command.
+    # The ending is required: under powershell.exe -Command, Windows PowerShell 5.1 turns a script's
+    # "Exit 1618" into process exit code 1 (tested), and Intune would read that as Failed instead of Retry.
+    # Git-Runner exits 1618 for the org registry values check and whenever Git cannot be installed right now
+    # (install mutex busy, latest-version lookup failed, download failed, installer still running), so every command needs it.
+    # Passing $LASTEXITCODE back out keeps 1618, 0 and 1 exactly (every Git-Runner path ends in an explicit
+    # Exit). If Git-Runner never starts (file missing, parse error, parameter binding error), $LASTEXITCODE
+    # is not set and a plain "exit $LASTEXITCODE" would report 0 (success); the -is [int] test makes that 1.
+    # An error thrown inside Git-Runner stops the whole -Command string, which also gives 1.
+    if (-not $command.EndsWith('"')) {
+        Write-Log "SCRIPT: $ThisFileName | FUNCTION: $($MyInvocation.MyCommand.Name) | END | Unexpected command shape; cannot finish the install command." "ERROR"
+        Exit 1
     }
+    $RequireOrgKeysArg = ''
+    if ($RequireOrgKeys) {
+        $RequireOrgKeysArg = " -RequireOrgKeys '$RequireOrgKeys'"
+    }
+    $command = $command.Substring(0, $command.Length - 1) + $RequireOrgKeysArg + '; if ($LASTEXITCODE -is [int]) { exit $LASTEXITCODE } else { exit 1 }' + '"'
         Write-Log ""
 
 
